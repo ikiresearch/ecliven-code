@@ -20,7 +20,7 @@ Agente de codigo con IA en terminal construido en Rust.
 ### Windows (PowerShell)
 
 ```powershell
-irm https://github.com/ikiresearch/ecliven-code/releases/latest/download/install.ps1 | iex
+irm https://ecliven.com/install.ps1 | iex
 ```
 
 Una vez instalado, solo escribe en cualquier terminal:
@@ -32,24 +32,27 @@ ecliven
 Para desinstalar:
 
 ```powershell
-$env:ECLIVEN_UNINSTALL = "1"; irm https://github.com/ikiresearch/ecliven-code/releases/latest/download/install.ps1 | iex
+$env:ECLIVEN_UNINSTALL = "1"; irm https://ecliven.com/install.ps1 | iex
 ```
 
 ### macOS / Linux
 
 ```sh
-curl -fsSL https://github.com/ikiresearch/ecliven-code/releases/latest/download/install.sh | sh
+curl -fsSL https://ecliven.com/install.sh | sh
 ```
 
-### Dominio propio (opcional)
+### Como funciona
 
-Si quieres distribuirlo con tu propio dominio (ej. `irm https://tu-dominio.com/install.ps1 | iex`), crea una redireccion `302` o sirve `install.ps1` apuntando a:
+`https://ecliven.com/install.ps1` y `https://ecliven.com/install.sh` redirigen al instalador del ultimo release en GitHub. `https://ecliven.com/install` elige solo: PowerShell recibe `install.ps1` y `curl`/`wget` reciben `install.sh`.
+
+Si el dominio no responde, usa GitHub directamente:
 
 ```text
 https://github.com/ikiresearch/ecliven-code/releases/latest/download/install.ps1
+https://github.com/ikiresearch/ecliven-code/releases/latest/download/install.sh
 ```
 
-`install.ps1` ya descarga los binarios compilados y valida su `SHA256SUMS.txt` automaticamente desde GitHub Releases (`ikiresearch/ecliven-code`).
+`install.ps1` descarga los binarios compilados y valida su `SHA256SUMS.txt` automaticamente desde GitHub Releases (`ikiresearch/ecliven-code`).
 
 ## Configuracion rapida (desarrollo local)
 
