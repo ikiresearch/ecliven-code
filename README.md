@@ -20,7 +20,7 @@ Agente de codigo con IA en terminal construido en Rust.
 ### Windows (PowerShell)
 
 ```powershell
-irm https://ecliven.com/install.ps1 | iex
+irm https://ecliven.com/code/install.ps1 | iex
 ```
 
 Una vez instalado, solo escribe en cualquier terminal:
@@ -32,18 +32,18 @@ ecliven
 Para desinstalar:
 
 ```powershell
-$env:ECLIVEN_UNINSTALL = "1"; irm https://ecliven.com/install.ps1 | iex
+$env:ECLIVEN_UNINSTALL = "1"; irm https://ecliven.com/code/install.ps1 | iex
 ```
 
 ### macOS / Linux
 
 ```sh
-curl -fsSL https://ecliven.com/install.sh | sh
+curl -fsSL https://ecliven.com/code/install.sh | sh
 ```
 
 ### Como funciona
 
-`https://ecliven.com/install.ps1` y `https://ecliven.com/install.sh` redirigen al instalador del ultimo release en GitHub. `https://ecliven.com/install` elige solo: PowerShell recibe `install.ps1` y `curl`/`wget` reciben `install.sh`.
+`https://ecliven.com/code/install.ps1` y `https://ecliven.com/code/install.sh` redirigen al instalador del ultimo release en GitHub. `https://ecliven.com/code/install` elige solo: PowerShell recibe `install.ps1` y `curl`/`wget` reciben `install.sh`.
 
 Si el dominio no responde, usa GitHub directamente:
 
