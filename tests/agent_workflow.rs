@@ -11,8 +11,10 @@ use ecliven_code::ai::{
     AiError, CompletionRequest, CompletionResponse, LlmProvider, TokenUsage, ToolCall,
 };
 use ecliven_code::config::{AppConfig, ApprovalMode, ProviderKind};
+use ecliven_code::swarm::domain::{SecuritySubMode, SwarmDomain};
+use ecliven_code::swarm::{SwarmEngine, SwarmEvent, SwarmOptions};
 use ecliven_code::tools::{ToolContext, ToolRegistry};
-use ecliven_code::tui::app::App;
+use ecliven_code::tui::app::{App, ChatEntry, WorkspaceSection};
 
 struct ScriptedProvider {
     turns: Mutex<Vec<CompletionResponse>>,
@@ -198,7 +200,7 @@ async fn denied_file_write_does_not_modify_disk() {
 async fn tui_app_slash_commands_switch_provider_and_model() {
     let tmp = TempDir::new().unwrap();
     let cfg = AppConfig::default_for_workspace(tmp.path().to_path_buf());
-    let mut app = App::new(cfg);
+    let mut app = App::new(cfg, None, None);
 
     let (tx, _rx) = mpsc::unbounded_channel();
 
@@ -216,4 +218,149 @@ async fn tui_app_slash_commands_switch_provider_and_model() {
     app.cursor_pos = app.input.len();
     app.submit_input(tx).await;
     assert_eq!(app.config.approval_mode, ApprovalMode::AutoEdit);
+}
+
+#[tokio::test]
+async fn tui_swarm_sections_and_security_submodes_stay_isolated() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("src/auth")).unwrap();
+    let cfg = AppConfig::default_for_workspace(tmp.path().to_path_buf());
+    let mut app = App::new(cfg, None, None);
+    let (tx, _rx) = mpsc::unbounded_channel();
+
+    assert_eq!(app.active_section, WorkspaceSection::Chat);
+
+    app.input = "/swarm".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert!(app.show_swarm_hub);
+
+    app.input = "/swarm code".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert_eq!(app.active_section, WorkspaceSection::SwarmCode);
+    assert!(!app.show_swarm_hub);
+    assert_eq!(app.active_state().roster.len(), 3);
+    assert_eq!(app.active_state().roster[0].badge, "CLEAN");
+
+    app.active_state_mut()
+        .entries
+        .push(ChatEntry::User("Implement fast parser".into()));
+
+    app.input = "/swarm security defense src/auth".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert_eq!(app.active_section, WorkspaceSection::SwarmSecurity);
+    assert_eq!(app.security_sub_mode, SecuritySubMode::Defense);
+    assert_eq!(app.active_state().target_scope.as_deref(), Some("src/auth"));
+    assert_eq!(app.active_state().roster[0].badge, "SURFACE");
+
+    assert!(
+        !app.active_state()
+            .entries
+            .iter()
+            .any(|e| matches!(e, ChatEntry::User(s) if s == "Implement fast parser")),
+        "Security swarm transcript must remain isolated from Code swarm transcript"
+    );
+
+    app.input = "/swarm security threat".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert_eq!(app.security_sub_mode, SecuritySubMode::ThreatModel);
+    assert_eq!(app.active_state().roster[0].badge, "STRIDE");
+
+    app.input = "/scope off".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert_eq!(app.active_state().target_scope, None);
+
+    app.input = "/swarm off".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx).await;
+    assert_eq!(app.active_section, WorkspaceSection::Chat);
+}
+
+struct DomainMockProvider;
+
+#[async_trait]
+impl LlmProvider for DomainMockProvider {
+    fn name(&self) -> &'static str {
+        "domain-mock"
+    }
+
+    fn model(&self) -> &str {
+        "domain-mock-1"
+    }
+
+    async fn complete(
+        &self,
+        request: &CompletionRequest,
+        delta_tx: Option<mpsc::UnboundedSender<String>>,
+    ) -> Result<CompletionResponse, AiError> {
+        let content: String = if request.system_prompt.contains("Master Combiner Agent") {
+            "CHIEF combined the clean API from CLEAN, zero-copy buffer from PERF, and edge-case tests from ROBUST.".into()
+        } else if request.system_prompt.contains("Clean Architecture Specialist") {
+            "CLEAN candidate implementation.".into()
+        } else if request.system_prompt.contains("Performance & Systems Specialist") {
+            "PERF candidate implementation.".into()
+        } else {
+            "ROBUST candidate implementation with tests.".into()
+        };
+
+        if let Some(tx) = delta_tx {
+            let _ = tx.send(content.clone());
+        }
+
+        Ok(CompletionResponse {
+            content,
+            tool_calls: Vec::new(),
+            usage: Some(TokenUsage {
+                input_tokens: 12,
+                output_tokens: 6,
+            }),
+            stop_reason: Some("end_turn".into()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn code_swarm_runs_three_coders_on_same_task_and_chief_combines_best_code() {
+    let tmp = TempDir::new().unwrap();
+    let engine = SwarmEngine::new(
+        SwarmDomain::Code,
+        Arc::new(DomainMockProvider),
+        Arc::new(ToolRegistry::default_registry()),
+        ToolContext::new(tmp.path().to_path_buf(), 10),
+        SwarmOptions::default(),
+    );
+
+    let mut session = Session::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+
+    engine
+        .run_turn(&mut session, "Build a fast LRU cache".into(), tx)
+        .await;
+
+    let mut badges = Vec::new();
+    let mut chief_done = false;
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            SwarmEvent::WorkerReport { badge, .. } => badges.push(badge),
+            SwarmEvent::SynthesisFinished {
+                lead_badge,
+                content,
+                ..
+            } => {
+                assert_eq!(lead_badge, "CHIEF");
+                assert!(content.contains("CHIEF combined"));
+                chief_done = true;
+            }
+            SwarmEvent::SwarmComplete => break,
+            _ => {}
+        }
+    }
+
+    badges.sort();
+    assert_eq!(badges, vec!["CLEAN", "PERF", "ROBUST"]);
+    assert!(chief_done);
 }

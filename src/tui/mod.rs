@@ -19,12 +19,17 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use crate::agent::AgentEvent;
 use crate::config::AppConfig;
-use crate::tui::app::App;
+use crate::swarm::domain::{SecuritySubMode, SwarmDomain};
+use crate::tui::app::{App, UiEvent, WorkspaceSection};
 use crate::tui::keybindings::{map_key, Action};
+use crate::updater::{self, UpdateStatus};
 
-pub async fn run_tui(config: AppConfig) -> Result<()> {
+pub async fn run_tui(
+    config: AppConfig,
+    initial_swarm: Option<SwarmDomain>,
+    initial_scope: Option<String>,
+) -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
 
@@ -33,7 +38,7 @@ pub async fn run_tui(config: AppConfig) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(config);
+    let mut app = App::new(config, initial_swarm, initial_scope);
     let run_result = event_loop(&mut terminal, &mut app).await;
 
     disable_raw_mode()?;
@@ -52,8 +57,15 @@ async fn event_loop(
     app: &mut App,
 ) -> Result<()> {
     let mut reader = EventStream::new();
-    let (agent_tx, mut agent_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
     let mut tick = tokio::time::interval(Duration::from_millis(120));
+
+    let update_tx = ui_tx.clone();
+    tokio::spawn(async move {
+        if let Ok(UpdateStatus::Available { latest, .. }) = updater::check_for_update().await {
+            let _ = update_tx.send(UiEvent::UpdateAvailable(latest));
+        }
+    });
 
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -68,20 +80,20 @@ async fn event_loop(
                     app.tick_count = app.tick_count.wrapping_add(1);
                 }
             }
-            maybe_agent_event = agent_rx.recv() => {
-                if let Some(ev) = maybe_agent_event {
-                    app.handle_agent_event(ev);
+            maybe_ui_event = ui_rx.recv() => {
+                if let Some(ev) = maybe_ui_event {
+                    app.handle_ui_event(ev);
                 }
             }
             maybe_term_event = reader.next() => {
                 match maybe_term_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        let action = map_key(key, app.pending_approval.is_some());
+                        let action = map_key(key, app.modal_state());
                         match action {
                             Action::Quit => app.should_quit = true,
                             Action::ClearSession => app.clear_session().await,
                             Action::ClearInput => app.clear_input(),
-                            Action::Submit => app.submit_input(agent_tx.clone()).await,
+                            Action::Submit => app.submit_input(ui_tx.clone()).await,
                             Action::InsertNewline => app.insert_char('\n'),
                             Action::InsertChar(c) => app.insert_char(c),
                             Action::Backspace => app.backspace(),
@@ -95,6 +107,18 @@ async fn event_loop(
                             Action::ScrollUp => app.scroll_up(5),
                             Action::ScrollDown => app.scroll_down(5),
                             Action::ToggleHelp => app.show_help = !app.show_help,
+                            Action::CycleSection => app.cycle_section(),
+                            Action::ToggleSwarmHub => app.show_swarm_hub = !app.show_swarm_hub,
+                            Action::ToggleSecuritySubMode => app.toggle_security_sub_mode(),
+                            Action::SelectChatSection => app.switch_section(WorkspaceSection::Chat),
+                            Action::SelectSwarmCode => app.switch_section(WorkspaceSection::SwarmCode),
+                            Action::SelectSwarmSecurityDefense => {
+                                app.set_security_sub_mode(SecuritySubMode::Defense)
+                            }
+                            Action::SelectSwarmSecurityThreat => {
+                                app.set_security_sub_mode(SecuritySubMode::ThreatModel)
+                            }
+                            Action::CloseModal => app.close_modals(),
                             Action::ApproveYes => app.resolve_approval(true),
                             Action::ApproveNo => app.resolve_approval(false),
                             Action::None => {}

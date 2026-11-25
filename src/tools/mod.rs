@@ -209,6 +209,15 @@ impl ToolRegistry {
         reg
     }
 
+    pub fn read_only_registry() -> Self {
+        let mut reg = Self::new();
+        reg.register(Arc::new(fs::ReadFileTool));
+        reg.register(Arc::new(fs::ListDirTool));
+        reg.register(Arc::new(search::SearchFilesTool));
+        reg.register(Arc::new(search::GrepContentTool));
+        reg
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
     }

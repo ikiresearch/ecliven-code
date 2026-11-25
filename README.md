@@ -13,6 +13,12 @@ Agente de codigo con IA en terminal construido en Rust.
   - `list_dir`, `search_files` (glob), `grep_content` (regex)
   - `run_command` (ejecucion de comandos con timeout configurable)
 - **Politicas de aprobacion**: `ask` (default), `auto-edit`, `auto-all`
+- **Modo Swarm con dos apartados aislados**:
+  - **Swarm: Code (Best-of-3 -> CHIEF)** (`--swarm code` / `/swarm code`): 3 codificadores independientes (`[CLEAN]`, `[PERF]`, `[ROBUST]`) resuelven la misma tarea en paralelo y un Agente Mayor (`[CHIEF]`) evalua y combina lo mejor de cada uno en una sola solucion optima.
+  - **Swarm: Security (2 modos defensivos)** (`--swarm security-defense` / `--swarm security-threat`):
+    - **Defensa (Codigo/Carpeta)** (`/swarm security defense [carpeta]`): audita una carpeta o codigo fuente con `[SURFACE]` + `[AUDIT]` (OWASP/CWE) + `[PATCH]` -> `[DEFENSE LEAD]`.
+    - **Threat Model & Hardening** (`/swarm security threat [carpeta]`): modelado `[STRIDE]` + `[CONFIG]` (dependencias/CI) + `[BLUETEAM]` -> `[SEC ARCHITECT]`.
+  - Pestanas separadas (`F2`), selector **Swarm Hub** (`F3` o `/swarm`), cambio de sub-modo de seguridad (`F4`) y foco por carpeta (`/scope <carpeta>` o `--scope <carpeta>`).
 - **TUI en Ratatui con atajos estandar (`Ctrl+tecla`)** y modo headless (`--prompt`)
 
 ## Instalacion rapida
@@ -28,6 +34,14 @@ Una vez instalado, solo escribe en cualquier terminal:
 ```powershell
 ecliven
 ```
+
+Para actualizar rapidamente a la ultima version:
+
+```powershell
+ecliven update
+```
+
+*(Tambien te avisa automaticamente al abrir la TUI cuando hay una nueva version y puedes ejecutar `/update` desde el chat.)*
 
 Para desinstalar:
 
@@ -81,11 +95,15 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 | `Ctrl+L` | Limpiar historial de conversacion |
 | `PgUp` / `PgDn` / Rueda | Hacer scroll en la conversacion |
 | `Up` / `Down` | Navegar historial de prompts |
+| `F2` | Cambiar de pestana (`Chat` -> `Swarm: Code` -> `Swarm: Security`) |
+| `F3` | Abrir Swarm Hub (selector separado de Codigo y Ciberseguridad) |
 | `F1` | Mostrar/ocultar ayuda |
 | `Ctrl+Q` | Salir |
 
 ## Comandos slash en el chat
 
+- `/swarm` (abre el Swarm Hub)
+- `/swarm code` / `/swarm security` / `/swarm off`
 - `/provider <anthropic|openai|openrouter|ollama>`
 - `/model <nombre-del-modelo>`
 - `/approval <ask|auto-edit|auto-all>`

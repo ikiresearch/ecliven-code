@@ -113,6 +113,29 @@ if ($arch -ne "X64" -and $arch -ne "Arm64") {
     throw "Unsupported Windows architecture: $arch. Expected X64 or Arm64."
 }
 
+function Install-BinarySafely {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+
+    $backup = "$Destination.old"
+    if (Test-Path $backup) {
+        Remove-Item -Path $backup -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $Destination) {
+        try {
+            Move-Item -Path $Destination -Destination $backup -Force
+        } catch {
+            # If move fails, fall back to direct copy
+        }
+    }
+    Copy-Item -Path $Source -Destination $Destination -Force
+    if (Test-Path $backup) {
+        Remove-Item -Path $backup -Force -ErrorAction SilentlyContinue
+    }
+}
+
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 $destExe = Join-Path $InstallDir "ecliven.exe"
 
@@ -121,7 +144,7 @@ if ($LocalBinary) {
         throw "Local binary not found: $LocalBinary"
     }
     Write-Host "Installing Ecliven Code from local binary '$LocalBinary'..." -ForegroundColor Cyan
-    Copy-Item -Path $LocalBinary -Destination $destExe -Force
+    Install-BinarySafely -Source $LocalBinary -Destination $destExe
 } else {
     $target = "x86_64-pc-windows-msvc"
     $assetName = "ecliven-$target.zip"
@@ -174,7 +197,7 @@ if ($LocalBinary) {
             throw "ecliven.exe was not found inside $assetName."
         }
 
-        Copy-Item -Path $foundExe.FullName -Destination $destExe -Force
+        Install-BinarySafely -Source $foundExe.FullName -Destination $destExe
     } finally {
         if (Test-Path $tempDir) {
             Remove-Item -Path $tempDir -Recurse -Force -ErrorAction SilentlyContinue

@@ -59,6 +59,16 @@ impl AgentEngine {
         options: AgentOptions,
     ) -> Self {
         let system_prompt = build_system_prompt(&tool_ctx.workspace_root);
+        Self::with_system_prompt(provider, tools, tool_ctx, options, system_prompt)
+    }
+
+    pub fn with_system_prompt(
+        provider: Arc<dyn LlmProvider>,
+        tools: Arc<ToolRegistry>,
+        tool_ctx: ToolContext,
+        options: AgentOptions,
+        system_prompt: String,
+    ) -> Self {
         Self {
             provider,
             tools,
