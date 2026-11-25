@@ -12,11 +12,13 @@ const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
+    let update_height = if app.available_update.is_some() { 1 } else { 0 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
+            Constraint::Length(update_height),
             Constraint::Length(1),
             Constraint::Min(5),
             Constraint::Length(5),
@@ -25,21 +27,24 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
         .split(area);
 
     render_header(frame, app, chunks[0]);
-    render_mode_tabs(frame, app, chunks[1]);
+    if app.available_update.is_some() {
+        render_update_banner(frame, app, chunks[1]);
+    }
+    render_mode_tabs(frame, app, chunks[2]);
 
     if let Some(domain) = app.active_swarm_domain() {
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-            .split(chunks[2]);
+            .split(chunks[3]);
         render_transcript(frame, app, body[0]);
         render_swarm_sidebar(frame, app, domain, body[1]);
     } else {
-        render_transcript(frame, app, chunks[2]);
+        render_transcript(frame, app, chunks[3]);
     }
 
-    render_input(frame, app, chunks[3]);
-    render_footer(frame, app, chunks[4]);
+    render_input(frame, app, chunks[4]);
+    render_footer(frame, app, chunks[5]);
 
     if app.pending_approval.is_some() {
         render_approval_modal(frame, app, area);
@@ -48,6 +53,19 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
     } else if app.show_help {
         render_help_modal(frame, area);
     }
+}
+
+fn render_update_banner(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(ref update) = app.available_update else {
+        return;
+    };
+    let text = format!(
+        " UPDATE AVAILABLE: v{} is outdated -> v{} ready! Press [F5] or type /update to upgrade now ",
+        crate::updater::CURRENT_VERSION,
+        update.version
+    );
+    let banner = Paragraph::new(text).style(Theme::update_banner());
+    frame.render_widget(banner, area);
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {

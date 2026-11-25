@@ -370,6 +370,24 @@ impl App {
         self.active_section = self.active_section.next();
     }
 
+    pub fn trigger_quick_update(&mut self, ui_tx: mpsc::UnboundedSender<UiEvent>) {
+        if self.is_busy {
+            return;
+        }
+        self.is_busy = true;
+        let target = self.available_update.as_ref().map(|u| u.tag_name.clone());
+        self.active_state_mut().entries.push(ChatEntry::System(
+            "Downloading and installing latest Ecliven Code release...".into(),
+        ));
+        self.active_state_mut().auto_scroll = true;
+        tokio::spawn(async move {
+            let res = updater::run_self_update(target.as_deref())
+                .await
+                .map_err(|e| e.to_string());
+            let _ = ui_tx.send(UiEvent::UpdateFinished(res));
+        });
+    }
+
     pub fn close_modals(&mut self) {
         self.show_swarm_hub = false;
         self.show_help = false;
@@ -997,20 +1015,7 @@ impl App {
                         let _ = ui_tx.send(event);
                     });
                 } else {
-                    self.is_busy = true;
-                    let target = self
-                        .available_update
-                        .as_ref()
-                        .map(|u| u.tag_name.clone());
-                    self.active_state_mut().entries.push(ChatEntry::System(
-                        "Downloading and installing latest Ecliven Code release...".into(),
-                    ));
-                    tokio::spawn(async move {
-                        let res = updater::run_self_update(target.as_deref())
-                            .await
-                            .map_err(|e| e.to_string());
-                        let _ = ui_tx.send(UiEvent::UpdateFinished(res));
-                    });
+                    self.trigger_quick_update(ui_tx);
                 }
             }
             "/chat" => {

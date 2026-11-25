@@ -108,9 +108,13 @@ if ($Uninstall) {
     return
 }
 
-$arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
-if ($arch -ne "X64" -and $arch -ne "Arm64") {
-    throw "Unsupported Windows architecture: $arch. Expected X64 or Arm64."
+$arch = if ($env:PROCESSOR_ARCHITECTURE) {
+    $env:PROCESSOR_ARCHITECTURE.ToUpperInvariant()
+} else {
+    "AMD64"
+}
+if ($arch -ne "AMD64" -and $arch -ne "X64" -and $arch -ne "ARM64") {
+    throw "Unsupported Windows architecture: $arch. Expected AMD64 or ARM64."
 }
 
 function Install-BinarySafely {
@@ -207,10 +211,11 @@ if ($LocalBinary) {
 
 Add-ToUserPath -Dir $InstallDir
 
-$installedVersion = (& $destExe --version 2>&1) | Out-String
+$installedVersion = ((& $destExe --version 2>&1) | Out-String)
+$versionText = if ($installedVersion) { $installedVersion.Trim() } else { "installed" }
 Write-Host ""
 Write-Host "Ecliven Code installed successfully!" -ForegroundColor Green
 Write-Host "  Binary:  $destExe"
-Write-Host "  Version: $($installedVersion.Trim())"
+Write-Host "  Version: $versionText"
 Write-Host ""
 Write-Host "Run 'ecliven' right now in this terminal (or any new terminal)." -ForegroundColor Cyan

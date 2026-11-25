@@ -15,6 +15,13 @@ impl Theme {
         Style::default().bg(Color::DarkGray).fg(Color::White)
     }
 
+    pub fn update_banner() -> Style {
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+    }
+
     pub fn tab_bar() -> Style {
         Style::default().bg(Color::Black).fg(Color::Gray)
     }

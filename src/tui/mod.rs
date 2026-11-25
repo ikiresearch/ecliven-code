@@ -110,6 +110,11 @@ async fn event_loop(
                             Action::CycleSection => app.cycle_section(),
                             Action::ToggleSwarmHub => app.show_swarm_hub = !app.show_swarm_hub,
                             Action::ToggleSecuritySubMode => app.toggle_security_sub_mode(),
+                            Action::QuickUpdate => {
+                                if app.available_update.is_some() {
+                                    app.trigger_quick_update(ui_tx.clone());
+                                }
+                            }
                             Action::SelectChatSection => app.switch_section(WorkspaceSection::Chat),
                             Action::SelectSwarmCode => app.switch_section(WorkspaceSection::SwarmCode),
                             Action::SelectSwarmSecurityDefense => {

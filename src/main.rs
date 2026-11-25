@@ -38,11 +38,21 @@ async fn main() -> Result<()> {
     let initial_scope = cli.scope;
 
     if let Some(prompt) = cli.prompt {
-        if let Some(domain) = initial_swarm {
+        let update_task = tokio::spawn(updater::check_for_update());
+        let res = if let Some(domain) = initial_swarm {
             run_headless_swarm(config, domain, initial_scope, prompt).await
         } else {
             run_headless(config, prompt).await
+        };
+        if let Ok(Ok(Ok(UpdateStatus::Available { current, latest }))) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), update_task).await
+        {
+            eprintln!(
+                "\n[ecliven] v{current} is outdated -> v{} available! Run 'ecliven update' to upgrade.",
+                latest.version
+            );
         }
+        res
     } else {
         ecliven_code::tui::run_tui(config, initial_swarm, initial_scope).await
     }
