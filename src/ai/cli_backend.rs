@@ -69,6 +69,7 @@ pub fn find_executable_in_path(binary: &str) -> Option<PathBuf> {
     None
 }
 
+#[derive(Clone)]
 pub struct ExternalCliProvider {
     kind: ProviderKind,
     binary_or_cmd: String,
@@ -116,6 +117,15 @@ impl ExternalCliProvider {
         self.timeout = Duration::from_secs(timeout_secs.max(1));
         self.sandbox = sandbox;
         self
+    }
+
+    /// Same CLI, working in `dir` with `sandbox` (e.g. a swarm candidate's isolated copy).
+    pub fn rebase(&self, dir: &std::path::Path, sandbox: SandboxMode) -> Self {
+        Self {
+            workspace_dir: dir.to_path_buf(),
+            sandbox,
+            ..self.clone()
+        }
     }
 
     fn format(&self) -> CliFormat {
@@ -309,6 +319,14 @@ impl LlmProvider for ExternalCliProvider {
         self.kind.as_str()
     }
 
+    fn rebased(
+        &self,
+        dir: &std::path::Path,
+        sandbox: SandboxMode,
+    ) -> Option<std::sync::Arc<dyn LlmProvider>> {
+        Some(std::sync::Arc::new(self.rebase(dir, sandbox)))
+    }
+
     fn model(&self) -> &str {
         &self.model
     }
@@ -461,6 +479,16 @@ mod tests {
         )
         .with_limits(5, SandboxMode::ReadOnly);
         let (_, cargs, _) = claude.build_command_and_args("hi").unwrap();
+        let codex = ExternalCliProvider::new(
+            ProviderKind::CodexCli,
+            "codex".into(),
+            "o3".into(),
+            PathBuf::from("/tmp/example/original"),
+        )
+        .rebase(std::path::Path::new("/tmp/example/copy"), SandboxMode::ReadOnly);
+        let (_, rargs, _) = codex.build_command_and_args("hi").unwrap();
+        assert!(rargs.windows(2).any(|w| w == ["-C", "/tmp/example/copy"]));
+        assert!(rargs.windows(2).any(|w| w == ["--sandbox", "read-only"]));
         assert!(cargs.windows(2).any(|w| w == ["--output-format", "stream-json"]));
         assert!(cargs.windows(2).any(|w| w == ["--permission-mode", "plan"]));
 

@@ -214,7 +214,7 @@ pub const COMPETITIVE_SPECIALISTS: &[SwarmAgentRole] = &[
 Role: Competing implementer A (Competitive Swarm).\n\
 You work alone in a private, writable copy of the workspace; other candidates solve the SAME task in their own copies.\n\
 Strategy: the smallest correct change. Touch as few files and lines as possible, follow existing conventions exactly.\n\
-Implement the task fully with write_file/edit_file/apply_patch. You cannot run commands, so read the existing tests and keep them passing.\n\
+Implement the task fully with write_file/edit_file/apply_patch. You cannot run commands. Existing tests and test configuration are restored from the initial snapshot before scoring, so make them pass instead of editing them.\n\
 When you finish, Ecliven runs the project's verification command on your copy and scores it; your report does not count. Finish with a short report: files changed and known gaps.",
     },
     SwarmAgentRole {
@@ -226,7 +226,7 @@ When you finish, Ecliven runs the project's verification command on your copy an
 Role: Competing implementer B (Competitive Swarm).\n\
 You work alone in a private, writable copy of the workspace; other candidates solve the SAME task in their own copies.\n\
 Strategy: robustness. Handle errors and edge cases explicitly and add tests that prove the behaviour.\n\
-Implement the task fully with write_file/edit_file/apply_patch. You cannot run commands, so read the existing tests and keep them passing.\n\
+Implement the task fully with write_file/edit_file/apply_patch. You cannot run commands. Existing tests and test configuration are restored from the initial snapshot before scoring, so make them pass instead of editing them.\n\
 When you finish, Ecliven runs the project's verification command on your copy and scores it; your report does not count. Finish with a short report: files changed and known gaps.",
     },
     SwarmAgentRole {
@@ -238,7 +238,7 @@ When you finish, Ecliven runs the project's verification command on your copy an
 Role: Competing implementer C (Competitive Swarm).\n\
 You work alone in a private, writable copy of the workspace; other candidates solve the SAME task in their own copies.\n\
 Strategy: efficient and well-structured code. Avoid needless work, allocations and indirection, keep the structure obvious.\n\
-Implement the task fully with write_file/edit_file/apply_patch. You cannot run commands, so read the existing tests and keep them passing.\n\
+Implement the task fully with write_file/edit_file/apply_patch. You cannot run commands. Existing tests and test configuration are restored from the initial snapshot before scoring, so make them pass instead of editing them.\n\
 When you finish, Ecliven runs the project's verification command on your copy and scores it; your report does not count. Finish with a short report: files changed and known gaps.",
     },
 ];
@@ -332,7 +332,7 @@ Finish with: bypass candidates ranked by impact, and for each one the assertion 
         system_directive: "\
 Role: Blue team hardening engineer (Red Eclipse). You receive the red team's attack paths for this round.\n\
 Verify each one in the code first; drop what you cannot reproduce and say so. Fix the confirmed ones with minimal, surgical edits that remove the whole class of issue, not just one input.\n\
-Apply changes with write_file/edit_file/apply_patch and keep existing behaviour working.\n\
+Apply changes with write_file/edit_file/apply_patch and keep existing behaviour working. Do not edit existing tests or test configuration.\n\
 Finish with: finding -> fix -> file:line, plus anything you deliberately did not change and why.",
     },
     SwarmAgentRole {
@@ -342,7 +342,7 @@ Finish with: finding -> fix -> file:line, plus anything you deliberately did not
         summary: "Regression tests that prove each fix holds",
         system_directive: "\
 Role: Blue team detection and test engineer (Red Eclipse). You run after the hardening engineer in each round.\n\
-Add regression tests that fail without the fix and pass with it, covering the assertions the red team asked for, then run the suite and report real results.\n\
+Add NEW regression tests that fail without the fix and pass with it, covering the assertions the red team asked for, then run the suite and report real results. Never modify or delete existing tests or test configuration: that marks the round as unverified.\n\
 Also check that failures are observable: errors are reported, not swallowed, and no secret is logged.\n\
 Finish with: tests added, exact commands run, their outcome and any attack path still unproven.",
     },

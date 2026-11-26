@@ -152,4 +152,14 @@ pub trait LlmProvider: Send + Sync {
         request: &CompletionRequest,
         delta_tx: Option<mpsc::UnboundedSender<String>>,
     ) -> Result<CompletionResponse, AiError>;
+
+    /// Backends that run their own agent in a directory (external CLIs) return a
+    /// copy bound to `dir` and `sandbox`; API backends never touch files and return `None`.
+    fn rebased(
+        &self,
+        _dir: &std::path::Path,
+        _sandbox: crate::tools::sandbox::SandboxMode,
+    ) -> Option<std::sync::Arc<dyn LlmProvider>> {
+        None
+    }
 }

@@ -13,6 +13,7 @@ use crate::agent::{AgentEngine, AgentEvent, AgentOptions};
 use crate::ai::{LlmProvider, TokenUsage};
 use crate::config::ApprovalMode;
 use crate::swarm::domain::{SwarmAgentRole, SwarmDomain};
+use crate::tools::sandbox::SandboxMode;
 use crate::tools::{ToolContext, ToolOutput, ToolPreview, ToolRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +165,13 @@ impl SwarmEngine {
         }
     }
 
+    /// Worker provider bound to `dir`: external CLI backends otherwise keep
+    /// working in the original workspace with their own write access.
+    fn worker_provider_in(&self, idx: usize, dir: &std::path::Path, sandbox: SandboxMode) -> Arc<dyn LlmProvider> {
+        let provider = self.worker_provider(idx);
+        provider.rebased(dir, sandbox).unwrap_or(provider)
+    }
+
     pub fn domain(&self) -> SwarmDomain {
         self.domain
     }
@@ -228,7 +236,8 @@ impl SwarmEngine {
 
         let mixed_models = !self.worker_providers.is_empty();
         let worker_futures = specialists.iter().copied().enumerate().map(|(idx, role)| {
-            let provider = self.worker_provider(idx);
+            let provider =
+                self.worker_provider_in(idx, &self.tool_ctx.workspace_root, SandboxMode::ReadOnly);
             let tools = Arc::clone(&self.read_only_tools);
             let tool_ctx = self.tool_ctx.clone();
             let mut options = self.options.clone();

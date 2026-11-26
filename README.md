@@ -177,7 +177,11 @@ rounds = 2                      # Red Eclipse, de 1 a 3
 ```
 
 - La verificación pasa por la misma política y aprobación que `run_command`; `swarm.verify` de un repo desconocido requiere Workspace Trust.
-- Competitive necesita `workspace-write`. Si el workspace cambió mientras corría, el ganador no se aplica.
+- Competitive necesita `workspace-write` y parte de una instantánea inmutable: todas las copias salen de ella y los cambios se comparan contra ella. Si un archivo que el ganador modifica cambió en el workspace durante la ejecución, no se aplica nada.
+- Solo gana un candidato que pasó la verificación; sin comando de verificación, o si se omite, no se aplica ningún cambio.
+- Antes de verificar, los tests existentes y la configuración del runner (`conftest.py`, `pytest.ini`, `Makefile`, `jest.config.*`, `.cargo/`, ...) se restauran desde la instantánea. Cambiar opciones de test en `Cargo.toml`, `package.json` o `pyproject.toml` descalifica al candidato. Los tests nuevos sí se conservan.
+- Los backends CLI externos se ejecutan dentro de la copia de cada candidato (`workspace-write`) y en solo lectura para los roles de análisis (planificador, equipo rojo, especialistas de los swarms de código y seguridad).
+- En Red Eclipse, si el equipo azul modifica tests existentes o la configuración de tests, la verificación de esa ronda se marca como no confiable.
 - En modo ahorro no se llama al modelo líder (el informe es determinista) y Red Eclipse hace 1 ronda.
 
 ## Politica de seguridad central
