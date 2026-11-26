@@ -330,15 +330,31 @@ impl AgentEngine {
                     }
                 };
 
-                if tool
-                    .risk_level()
-                    .requires_approval(self.options.approval_mode)
-                {
+                let decision = crate::tools::policy::evaluate(
+                    &call.name,
+                    tool.risk_level(),
+                    &self.tool_ctx,
+                    self.options.approval_mode,
+                );
+                if let crate::tools::policy::Decision::Deny(reason) = &decision {
+                    let msg = format!("Blocked by security policy: {reason}");
+                    session.push_tool_result(&call.id, &call.name, msg.clone());
+                    let _ = event_tx.send(AgentEvent::ToolCompleted {
+                        tool_name: call.name,
+                        output: ToolOutput::err(msg),
+                    });
+                    continue;
+                }
+                if let crate::tools::policy::Decision::Ask { note } = decision {
+                    let mut preview = preview.clone();
+                    if let Some(note) = note {
+                        preview.summary = format!("{} [{note}]", preview.summary);
+                    }
                     let (resp_tx, resp_rx) = oneshot::channel();
                     let _ = event_tx.send(AgentEvent::ToolApprovalRequested {
                         call_id: call.id.clone(),
                         tool_name: call.name.clone(),
-                        preview: preview.clone(),
+                        preview,
                         respond_to: resp_tx,
                     });
 
