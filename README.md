@@ -130,6 +130,7 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/mcp`
 - `/router [on|off]` | `/saver [on|off]` | `/swarm-models`
 - `/memory [search <q>|add [--user] <texto>|forget <id>|confirm <id>|stale]`
+- `/trust [yes|deny|revoke|status]`
 - `/index [rebuild]` | `/tasks` | `/goal [<texto>|done|clear]` | `/workflow [on|off]`
 - `/status`
 - `/clear`
@@ -159,6 +160,27 @@ Los modelos se indican como `proveedor/modelo` (por ejemplo `anthropic/test-mode
 - **Swarm multi-modelo:** `[swarm].workers` asigna un modelo a cada especialista por turnos, y `lead` el modelo que sintetiza. Cada agente muestra su modelo en la Swarm Hub. Sin configuracion se usa el modelo activo.
 - **Model router:** con `[router].enabled = true`, cada turno se clasifica sin llamar a ningun modelo (dificultad `simple`/`standard`/`complex` y especialidad: security, frontend, backend, data, tests, docs, devops). Se usa el modelo de la especialidad si existe; si no, `cheap`, `standard` o `strong` segun la dificultad. El chat muestra que modelo eligio y por que.
 - **Modo ahorro** (`--saver`, `/saver on` o `saver_mode = true`): baja un nivel de modelo (o usa `cheap` si el router esta apagado), limita la respuesta a 2048 tokens, recorta a 4000 caracteres la salida de herramientas que queda en el historial, compacta al 60 % y pide al modelo respuestas cortas y lecturas minimas. En Swarm, los especialistas hacen como maximo 4 iteraciones y usan `cheap` si no hay `[swarm].workers`.
+
+## Confianza en el workspace
+
+El `.ecliven.toml` de un repositorio puede incluir ajustes que ejecutan codigo o reducen la seguridad.
+Esos ajustes quedan desactivados hasta que confies en el workspace:
+
+- `approval_mode` distinto de `ask`;
+- `sandbox_mode = "danger-full-access"` y `sandbox_writable_roots`;
+- servidores `[mcp_servers]` (inician procesos o conectan a URLs);
+- `command` y `base_url` de `[providers.*]` (ejecutan programas o reciben tu API key).
+
+El resto del archivo (modelo, limites, router, modo ahorro, memoria) se aplica siempre. La configuracion
+global, las variables de entorno y los flags de la CLI son tuyos y no necesitan confianza.
+
+Al abrir un workspace desconocido, Ecliven lista esos ajustes y pregunta `[y]es / [n]ot now / [d]eny`.
+La decision se guarda en `<config>/ecliven-code/trusted_workspaces.json` (o `ECLIVEN_TRUST_FILE`) junto con
+una huella de los ajustes: si cambian (por ejemplo, tras un `git pull` que agrega un servidor MCP), vuelve a preguntar.
+
+- TUI: `/trust`, `/trust deny`, `/trust revoke`, `/trust status`.
+- CLI: `ecliven trust [--deny|--revoke]`.
+- Modo sin interfaz y CI: no pregunta; usa `--trust-workspace` para confiar solo en esa ejecucion.
 
 ## Memoria y conocimiento del proyecto
 

@@ -10,6 +10,7 @@ use ecliven_code::agent::store::{self, SessionStore};
 use ecliven_code::agent::{AgentEngine, AgentEvent, AgentOptions};
 use ecliven_code::ai::registry::build_provider;
 use ecliven_code::cli::{Cli, Commands};
+use ecliven_code::config::trust::{TrustStatus, TrustStore};
 use ecliven_code::config::AppConfig;
 use ecliven_code::mcp;
 use ecliven_code::swarm::domain::SwarmDomain;
@@ -91,6 +92,27 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Commands::Trust { revoke, deny }) => {
+            let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
+            let key = ecliven_code::config::trust::workspace_key(&config.workspace_dir);
+            let mut store = TrustStore::load_default();
+            if revoke {
+                store.revoke(&key);
+                store.save().map_err(anyhow::Error::msg)?;
+                println!("Removed the trust decision for {key}.");
+                return Ok(());
+            }
+            store.set(&key, !deny, &config.workspace_trust.fingerprint);
+            store.save().map_err(anyhow::Error::msg)?;
+            println!(
+                "{} {key}.",
+                if deny { "Denied" } else { "Trusted" }
+            );
+            for item in &config.workspace_trust.restricted {
+                println!("  - {item}");
+            }
+            return Ok(());
+        }
         Some(Commands::Index { rebuild }) => {
             let arg = if rebuild { "rebuild" } else { "" };
             let msg = ecliven_code::knowledge::commands::run(&workspace_dir, "/index", arg)
@@ -100,6 +122,12 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Mcp) => {
             let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
+            if config.workspace_trust.withheld() {
+                eprintln!(
+                    "[ecliven] {}\n[ecliven] Run `ecliven trust` to enable them.",
+                    config.workspace_trust.describe()
+                );
+            }
             let conns = mcp::connect_all(&config.mcp_servers).await;
             println!("{}", conns.summary());
             for tool in &conns.tools {
@@ -115,6 +143,7 @@ async fn main() -> Result<()> {
         _ => cli.resume.clone(),
     };
     let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
+    let config = resolve_workspace_trust(config, cli.prompt.is_some())?;
     let initial_swarm: Option<SwarmDomain> = cli.swarm.map(Into::into);
     let initial_scope = cli.scope;
 
@@ -136,6 +165,40 @@ async fn main() -> Result<()> {
         res
     } else {
         ecliven_code::tui::run_tui(config, initial_swarm, initial_scope, cli.setup, resume).await
+    }
+}
+
+/// Asks before enabling executable settings from an unknown workspace config.
+fn resolve_workspace_trust(config: AppConfig, headless: bool) -> Result<AppConfig> {
+    use std::io::{IsTerminal, Write};
+    let trust = &config.workspace_trust;
+    if !trust.needs_decision() {
+        return Ok(config);
+    }
+    if headless || !std::io::stdin().is_terminal() {
+        eprintln!(
+            "[ecliven] {}\n[ecliven] Run `ecliven trust` or pass --trust-workspace to enable them.",
+            trust.describe()
+        );
+        return Ok(config);
+    }
+    eprintln!("{}\n", trust.describe());
+    eprint!("Trust this workspace and enable these settings? [y]es / [n]ot now / [d]eny: ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    match answer.trim().to_lowercase().as_str() {
+        "y" | "yes" | "s" | "si" | "sí" => {
+            TrustStore::decide(trust, true).map_err(anyhow::Error::msg)?;
+            Ok(config.reload()?)
+        }
+        "d" | "deny" => {
+            TrustStore::decide(trust, false).map_err(anyhow::Error::msg)?;
+            let mut config = config;
+            config.workspace_trust.status = TrustStatus::Denied;
+            Ok(config)
+        }
+        _ => Ok(config),
     }
 }
 

@@ -1,7 +1,8 @@
 pub mod defaults;
 pub mod preferences;
+pub mod trust;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -224,6 +225,8 @@ pub struct AppConfig {
     pub swarm_worker_models: Vec<String>,
     pub swarm_lead_model: Option<String>,
     pub knowledge: KnowledgeConfig,
+    pub workspace_trust: trust::WorkspaceTrust,
+    pub cli_overrides: CliOverrides,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -302,6 +305,103 @@ struct FileConfig {
     providers: Option<FileProvidersConfig>,
 }
 
+impl FileConfig {
+    /// Settings that can run code, weaken approvals or redirect API keys, as
+    /// display lines plus the exact material the trust fingerprint covers.
+    fn restricted_settings(&self) -> (Vec<String>, String) {
+        let mut shown = Vec::new();
+        let mut material = Vec::new();
+        if let Some(mode) = self.approval_mode.filter(|m| *m != ApprovalMode::Ask) {
+            let mode = serde_json::to_string(&mode).unwrap_or_default();
+            shown.push(format!("approval_mode = {} (runs tools without asking)", mode.trim_matches('"')));
+        }
+        if self.sandbox_mode == Some(SandboxMode::DangerFullAccess) {
+            shown.push("sandbox_mode = danger-full-access (commands run unsandboxed)".into());
+        }
+        if let Some(roots) = self.sandbox_writable_roots.as_ref().filter(|r| !r.is_empty()) {
+            let list: Vec<String> = roots.iter().map(|r| r.display().to_string()).collect();
+            shown.push(format!("sandbox_writable_roots = {}", list.join(", ")));
+        }
+        if let Some(servers) = &self.mcp_servers {
+            for (name, s) in servers.iter().filter(|(_, s)| s.enabled) {
+                let target = match (&s.command, &s.url) {
+                    (Some(cmd), _) => format!("starts `{}`", [cmd.as_str()].into_iter().chain(s.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ")),
+                    (None, Some(url)) => format!("connects to {url}"),
+                    (None, None) => "has no command or url".into(),
+                };
+                let mut line = format!("MCP server '{name}' {target}");
+                if !s.env.is_empty() {
+                    let keys: Vec<&str> = s.env.keys().map(String::as_str).collect();
+                    line.push_str(&format!(" with env {}", keys.join(", ")));
+                }
+                if s.trusted {
+                    line.push_str(" (tools run without approval)");
+                }
+                shown.push(line);
+                let env: BTreeMap<_, _> = s.env.iter().collect();
+                let headers: BTreeMap<_, _> = s.headers.iter().collect();
+                material.push(format!("mcp:{name}:{env:?}:{headers:?}"));
+            }
+        }
+        if let Some(p) = &self.providers {
+            let entries = [
+                ("anthropic", &p.anthropic),
+                ("openai", &p.openai),
+                ("openrouter", &p.openrouter),
+                ("ollama", &p.ollama),
+                ("codex", &p.codex),
+                ("agy", &p.agy),
+                ("claude", &p.claude),
+                ("opencode", &p.opencode),
+                ("gemini", &p.gemini),
+                ("cli", &p.cli),
+            ];
+            for (name, entry) in entries {
+                let Some(e) = entry else { continue };
+                if let Some(cmd) = &e.command {
+                    shown.push(format!("providers.{name}.command = {cmd} (runs a program)"));
+                }
+                if let Some(url) = &e.base_url {
+                    shown.push(format!("providers.{name}.base_url = {url} (receives your API key and code)"));
+                }
+            }
+        }
+        material.extend(shown.iter().cloned());
+        (shown, material.join("\n"))
+    }
+
+    fn withhold_restricted(&mut self) {
+        if self.approval_mode != Some(ApprovalMode::Ask) {
+            self.approval_mode = None;
+        }
+        if self.sandbox_mode == Some(SandboxMode::DangerFullAccess) {
+            self.sandbox_mode = None;
+        }
+        self.sandbox_writable_roots = None;
+        self.mcp_servers = None;
+        if let Some(p) = &mut self.providers {
+            for e in [
+                &mut p.anthropic,
+                &mut p.openai,
+                &mut p.openrouter,
+                &mut p.ollama,
+                &mut p.codex,
+                &mut p.agy,
+                &mut p.claude,
+                &mut p.opencode,
+                &mut p.gemini,
+                &mut p.cli,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                e.command = None;
+                e.base_url = None;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct FileProvidersConfig {
     anthropic: Option<FileProviderEntry>,
@@ -331,6 +431,8 @@ pub struct CliOverrides {
     pub approval_mode: Option<ApprovalMode>,
     pub sandbox_mode: Option<SandboxMode>,
     pub saver_mode: bool,
+    /// Trust the project's executable settings for this run without saving a decision.
+    pub trust_workspace: bool,
 }
 
 impl AppConfig {
@@ -367,6 +469,8 @@ impl AppConfig {
             swarm_worker_models: Vec::new(),
             swarm_lead_model: None,
             knowledge: KnowledgeConfig::default(),
+            workspace_trust: trust::WorkspaceTrust::default(),
+            cli_overrides: CliOverrides::default(),
         }
     }
 
@@ -446,6 +550,26 @@ impl AppConfig {
         env: &HashMap<String, String>,
         overrides: &CliOverrides,
     ) -> Result<Self, ConfigError> {
+        Self::load_from_sources_with_trust(
+            workspace_dir,
+            global_config_path,
+            local_config_path,
+            env,
+            overrides,
+            &trust::TrustStore::load_default(),
+        )
+    }
+
+    /// The global config, env and CLI flags are the user's own and always apply;
+    /// executable settings from the project config apply only if the workspace is trusted.
+    pub fn load_from_sources_with_trust(
+        workspace_dir: PathBuf,
+        global_config_path: Option<&Path>,
+        local_config_path: Option<&Path>,
+        env: &HashMap<String, String>,
+        overrides: &CliOverrides,
+        trust_store: &trust::TrustStore,
+    ) -> Result<Self, ConfigError> {
         let mut cfg = Self::default_for_workspace(workspace_dir);
 
         if let Some(path) = global_config_path {
@@ -456,14 +580,40 @@ impl AppConfig {
 
         if let Some(path) = local_config_path {
             if path.exists() {
-                cfg.apply_file(path)?;
+                let mut parsed = Self::parse_file(path)?;
+                let (restricted, material) = parsed.restricted_settings();
+                let key = trust::workspace_key(&cfg.workspace_dir);
+                let fingerprint = crate::knowledge::hash_bytes(material.as_bytes());
+                let status = if restricted.is_empty() {
+                    trust::TrustStatus::NotRequired
+                } else if overrides.trust_workspace {
+                    trust::TrustStatus::Session
+                } else {
+                    trust_store.status(&key, &fingerprint)
+                };
+                cfg.workspace_trust = trust::WorkspaceTrust {
+                    status,
+                    key,
+                    restricted,
+                    fingerprint,
+                };
+                if cfg.workspace_trust.withheld() {
+                    parsed.withhold_restricted();
+                }
+                cfg.apply_parsed(parsed);
             }
         }
 
         cfg.apply_env(env)?;
         cfg.apply_overrides(overrides);
+        cfg.cli_overrides = overrides.clone();
 
         Ok(cfg)
+    }
+
+    /// Reloads from disk after a trust decision, keeping the CLI flags of this run.
+    pub fn reload(&self) -> Result<Self, ConfigError> {
+        Self::load(self.workspace_dir.clone(), &self.cli_overrides)
     }
 
     pub fn active_settings(&self) -> &ProviderSettings {
@@ -494,15 +644,24 @@ impl AppConfig {
             .base_url = command.into();
     }
 
-    fn apply_file(&mut self, path: &Path) -> Result<(), ConfigError> {
+    fn parse_file(path: &Path) -> Result<FileConfig, ConfigError> {
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
             path: path.to_path_buf(),
             source,
         })?;
-        let parsed: FileConfig = toml::from_str(&raw).map_err(|source| ConfigError::ParseToml {
+        toml::from_str(&raw).map_err(|source| ConfigError::ParseToml {
             path: path.to_path_buf(),
             source: Box::new(source),
-        })?;
+        })
+    }
+
+    fn apply_file(&mut self, path: &Path) -> Result<(), ConfigError> {
+        let parsed = Self::parse_file(path)?;
+        self.apply_parsed(parsed);
+        Ok(())
+    }
+
+    fn apply_parsed(&mut self, parsed: FileConfig) {
 
         if let Some(provider) = parsed.provider {
             self.active_provider = provider;
@@ -578,8 +737,6 @@ impl AppConfig {
         if let Some(model) = parsed.model {
             self.set_model(model);
         }
-
-        Ok(())
     }
 
     fn merge_provider_entry(&mut self, kind: ProviderKind, entry: Option<FileProviderEntry>) {
@@ -758,6 +915,7 @@ model = "llama3.2"
             approval_mode: Some(ApprovalMode::AutoEdit),
             sandbox_mode: None,
             saver_mode: false,
+            trust_workspace: false,
         };
 
         let cfg = AppConfig::load_from_sources(

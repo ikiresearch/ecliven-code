@@ -32,6 +32,15 @@ pub enum Commands {
     },
     /// List configured MCP servers and the tools they expose
     Mcp,
+    /// Trust this workspace so its .ecliven.toml may enable MCP servers, custom provider commands/URLs, auto-approval and unsandboxed commands
+    Trust {
+        /// Forget the saved decision for this workspace
+        #[arg(long)]
+        revoke: bool,
+        /// Keep the executable project settings disabled without asking again
+        #[arg(long, conflicts_with = "revoke")]
+        deny: bool,
+    },
     /// Refresh the project code index (only changed files are re-parsed)
     Index {
         /// Drop the index and re-parse every file
@@ -139,6 +148,10 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Commands>,
 
+    /// Enable the project's executable settings for this run without saving a trust decision
+    #[arg(long = "trust-workspace", global = true)]
+    pub trust_workspace: bool,
+
     /// Working directory for the coding session (defaults to current directory)
     #[arg(short = 'd', long = "dir")]
     pub dir: Option<PathBuf>,
@@ -192,6 +205,7 @@ impl Cli {
             approval_mode: self.approval.map(Into::into),
             sandbox_mode: self.sandbox.map(Into::into),
             saver_mode: self.saver,
+            trust_workspace: self.trust_workspace,
         }
     }
 }
