@@ -86,6 +86,7 @@ async fn event_loop(
     });
 
     app.prefetch_models(ui_tx.clone());
+    app.announce_workspace_trust();
     app.start_mcp(ui_tx.clone());
 
     loop {

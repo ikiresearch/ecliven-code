@@ -64,7 +64,16 @@ pub struct AgentEngine {
     system_prompt: String,
     compaction: Option<CompactionPolicy>,
     saver: bool,
+    knowledge: Option<crate::knowledge::BriefOptions>,
 }
+
+const KNOWLEDGE_DIRECTIVE: &str = "\n\nProject knowledge: each user message may end with a <project_context> brief (active task, git state, memories with provenance, index hints). \
+Prefer code_search and find_symbol over reading whole files, memory_search to recall conventions, update_plan for multi-step tasks, and memory_save only for durable verified facts (cite source files). \
+Index hints and stale memories can be outdated: read the current file before editing it.";
+
+const WORKFLOW_DIRECTIVE: &str = "\n\nWORKFLOW for every request: 1) recall applicable rules and context (brief, memory_search); 2) inspect the current files involved; \
+3) for multi-step work, record a short plan with update_plan; 4) apply controlled changes (apply_patch/edit_file); 5) run the authorized checks (build/tests) with run_command; \
+6) review the diff (git diff) and results; 7) report briefly to the user; 8) save only useful durable facts with memory_save and mark the plan done.";
 
 impl AgentEngine {
     pub fn new(
@@ -92,7 +101,18 @@ impl AgentEngine {
             system_prompt,
             compaction: None,
             saver: false,
+            knowledge: None,
         }
+    }
+
+    /// Injects a budgeted project brief per turn and records task history afterwards.
+    pub fn with_knowledge(mut self, brief: crate::knowledge::BriefOptions, workflow: bool) -> Self {
+        self.knowledge = Some(brief);
+        self.system_prompt.push_str(KNOWLEDGE_DIRECTIVE);
+        if workflow {
+            self.system_prompt.push_str(WORKFLOW_DIRECTIVE);
+        }
+        self
     }
 
     /// Saver mode: shorter answers, capped tool output kept in history.
@@ -163,6 +183,65 @@ impl AgentEngine {
     }
 
     pub async fn run_turn(
+        &self,
+        session: &mut Session,
+        user_input: String,
+        event_tx: mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let Some(opts) = self.knowledge else {
+            return self.run_turn_inner(session, user_input, event_tx).await;
+        };
+        let ws = self.tool_ctx.workspace_root.clone();
+        let prompt = user_input.clone();
+        let brief = tokio::task::spawn_blocking(move || {
+            let mut project = crate::knowledge::KnowledgeStore::open(&ws)?;
+            let user = crate::knowledge::KnowledgeStore::open_user().ok();
+            crate::knowledge::build_brief(&mut project, user.as_ref(), &prompt, opts)
+        })
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r);
+        let input = match brief {
+            Ok(Some(b)) => format!("{user_input}\n\n{b}"),
+            Ok(None) => user_input.clone(),
+            Err(e) => {
+                let _ = event_tx.send(AgentEvent::Notice(format!("Project knowledge unavailable: {e}")));
+                user_input.clone()
+            }
+        };
+        let before = session.messages().len();
+        self.run_turn_inner(session, input, event_tx).await;
+
+        let root = self.tool_ctx.workspace_root.clone();
+        let files: Vec<String> = session
+            .checkpoints()
+            .last()
+            .map(|cp| {
+                cp.paths()
+                    .map(|p| crate::knowledge::indexer::rel_path(&root, p))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let answer = session.messages()[before.min(session.messages().len())..]
+            .iter()
+            .rev()
+            .find(|m| m.role == crate::ai::Role::Assistant && !m.content.trim().is_empty())
+            .map(|m| m.content.clone());
+        let ok = answer.is_some();
+        let summary = answer.unwrap_or_else(|| "(no answer: turn failed or was interrupted)".into());
+        let ws = self.tool_ctx.workspace_root.clone();
+        let _ = tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let mut store = crate::knowledge::KnowledgeStore::open(&ws)?;
+            store.record_turn(&user_input, &files, &summary, ok)?;
+            if !files.is_empty() {
+                store.refresh()?;
+            }
+            Ok(())
+        })
+        .await;
+    }
+
+    async fn run_turn_inner(
         &self,
         session: &mut Session,
         user_input: String,

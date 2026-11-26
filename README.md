@@ -129,6 +129,9 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/sessions` | `/resume [id|last]`
 - `/mcp`
 - `/router [on|off]` | `/saver [on|off]` | `/swarm-models`
+- `/memory [search <q>|add [--user] <texto>|forget <id>|confirm <id>|stale]`
+- `/trust [yes|deny|revoke|status]`
+- `/index [rebuild]` | `/tasks` | `/goal [<texto>|done|clear]` | `/workflow [on|off]`
 - `/status`
 - `/clear`
 - `/help`
@@ -158,6 +161,58 @@ Los modelos se indican como `proveedor/modelo` (por ejemplo `anthropic/test-mode
 - **Model router:** con `[router].enabled = true`, cada turno se clasifica sin llamar a ningun modelo (dificultad `simple`/`standard`/`complex` y especialidad: security, frontend, backend, data, tests, docs, devops). Se usa el modelo de la especialidad si existe; si no, `cheap`, `standard` o `strong` segun la dificultad. El chat muestra que modelo eligio y por que.
 - **Modo ahorro** (`--saver`, `/saver on` o `saver_mode = true`): baja un nivel de modelo (o usa `cheap` si el router esta apagado), limita la respuesta a 2048 tokens, recorta a 4000 caracteres la salida de herramientas que queda en el historial, compacta al 60 % y pide al modelo respuestas cortas y lecturas minimas. En Swarm, los especialistas hacen como maximo 4 iteraciones y usan `cheap` si no hay `[swarm].workers`.
 
+## Confianza en el workspace
+
+El `.ecliven.toml` de un repositorio puede incluir ajustes que ejecutan codigo o reducen la seguridad.
+Esos ajustes quedan desactivados hasta que confies en el workspace:
+
+- `approval_mode` distinto de `ask`;
+- `sandbox_mode = "danger-full-access"` y `sandbox_writable_roots`;
+- servidores `[mcp_servers]` (inician procesos o conectan a URLs);
+- `command` y `base_url` de `[providers.*]` (ejecutan programas o reciben tu API key).
+
+El resto del archivo (modelo, limites, router, modo ahorro, memoria) se aplica siempre. La configuracion
+global, las variables de entorno y los flags de la CLI son tuyos y no necesitan confianza.
+
+Al abrir un workspace desconocido, Ecliven lista esos ajustes y pregunta `[y]es / [n]ot now / [d]eny`.
+La decision se guarda en `<config>/ecliven-code/trusted_workspaces.json` (o `ECLIVEN_TRUST_FILE`) junto con
+una huella de los ajustes: si cambian (por ejemplo, tras un `git pull` que agrega un servidor MCP), vuelve a preguntar.
+
+- TUI: `/trust`, `/trust deny`, `/trust revoke`, `/trust status`.
+- CLI: `ecliven trust [--deny|--revoke]`.
+- Modo sin interfaz y CI: no pregunta; usa `--trust-workspace` para confiar solo en esa ejecucion.
+
+## Memoria y conocimiento del proyecto
+
+Ecliven guarda el conocimiento de cada proyecto en una base SQLite fuera del repositorio
+(`<datos-del-usuario>/ecliven-code/knowledge/`, o `ECLIVEN_KNOWLEDGE_DIR`). Las memorias del usuario
+van en `user.db` y se comparten entre proyectos.
+
+**Capas:** instrucciones (`AGENTS.md`), trabajo activo (objetivo y plan), sesiones y tareas
+(un registro por turno, sin llamar al modelo), conocimiento del proyecto (memorias con procedencia)
+e indice del codigo.
+
+**Vistas del repositorio:**
+- indice textual (FTS5 con ranking BM25) por fragmentos de codigo;
+- simbolos y relaciones (definiciones e imports) con un analizador ligero por lenguaje;
+- busqueda semantica opcional (apagada por defecto y nunca en modo ahorro);
+- estado de Git (rama y archivos modificados).
+
+**Frescura:** cada archivo indexado guarda ruta, hash, lenguaje y version del analizador. Antes de cada
+consulta se comparan tamano y fecha, y si cambian, el hash; solo se reanaliza lo que cambio. Las memorias
+que citan un archivo modificado o borrado quedan marcadas `POSSIBLY STALE`; los renombrados se detectan por
+hash y conservan sus memorias. Los embeddings se guardan por hash del fragmento, asi que solo se generan
+para contenido nuevo.
+
+**Contexto barato:** cada mensaje lleva un bloque `<project_context>` de 1500 tokens como maximo (600 en
+modo ahorro) con la tarea activa, Git, memorias relevantes y referencias `ruta:lineas`, nunca archivos enteros.
+
+**Herramientas del agente:** `code_search`, `find_symbol`, `memory_search`, `memory_save` y `update_plan`
+(sin aprobacion: no modifican el repositorio). En la CLI: `ecliven index [--rebuild]`.
+
+**Workflow opcional** (`/workflow on`): recuperar contexto, inspeccionar archivos, planificar, aplicar
+cambios, verificar, revisar el diff, informar y guardar memoria util.
+
 ## Configuracion nueva en `.ecliven.toml`
 
 ```toml
@@ -186,6 +241,12 @@ frontend = "openrouter/vendor/test-frontend"
 command = "npx"
 args = ["-y", "@example/mcp-server"]
 env = { EXAMPLE_TOKEN = "..." }
+
+[knowledge]
+enabled = true                     # brief por turno y herramientas de conocimiento
+brief_tokens = 1500                # en modo ahorro el maximo es 600
+workflow = false
+# embeddings = "ollama/nomic-embed-text"   # opcional: busqueda semantica
 
 [mcp_servers.remoto]
 url = "https://example.com/mcp"
