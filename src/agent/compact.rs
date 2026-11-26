@@ -66,11 +66,8 @@ fn render_transcript(messages: &[Message], max_chars: usize) -> String {
         };
         let mut body = m.content.clone();
         if m.role == Role::Tool && body.len() > MAX_TOOL_OUTPUT_CHARS {
-            let mut cut = MAX_TOOL_OUTPUT_CHARS;
-            while !body.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            body.truncate(cut);
+            let keep = crate::tools::truncate_str(&body, MAX_TOOL_OUTPUT_CHARS).len();
+            body.truncate(keep);
             body.push_str(" ... [truncated]");
         }
         out.push_str(label);

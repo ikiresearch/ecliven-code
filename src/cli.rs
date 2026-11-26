@@ -153,6 +153,10 @@ pub struct Cli {
     #[arg(long = "sandbox", value_enum)]
     pub sandbox: Option<CliSandboxMode>,
 
+    /// Saver mode: cheapest models, shorter outputs and earlier compaction
+    #[arg(long = "saver")]
+    pub saver: bool,
+
     /// Continue a saved session (ID, unique prefix, or "last") in the TUI or with --prompt
     #[arg(long = "resume")]
     pub resume: Option<String>,
@@ -181,6 +185,7 @@ impl Cli {
             model: self.model.clone(),
             approval_mode: self.approval.map(Into::into),
             sandbox_mode: self.sandbox.map(Into::into),
+            saver_mode: self.saver,
         }
     }
 }
