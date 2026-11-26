@@ -61,6 +61,7 @@ fn render_landing(frame: &mut Frame<'_>, app: &App, area: Rect, update_height: u
         WorkspaceSection::Chat => EclipsePalette::solar(),
         WorkspaceSection::SwarmCode => EclipsePalette::code_swarm(),
         WorkspaceSection::SwarmSecurity => EclipsePalette::security_swarm(),
+        WorkspaceSection::SwarmTeam => EclipsePalette::code_swarm(),
     };
     let eclipse_frame = eclipse::render_frame(app.elapsed_secs(), art_height, palette);
 
@@ -86,6 +87,7 @@ fn render_landing(frame: &mut Frame<'_>, app: &App, area: Rect, update_height: u
         WorkspaceSection::Chat => Theme::brand(),
         WorkspaceSection::SwarmCode => Theme::tab_active_code(),
         WorkspaceSection::SwarmSecurity => Theme::tab_active_security(),
+        WorkspaceSection::SwarmTeam => Theme::tab_active_code(),
     };
     let hero_title = match app.active_swarm_domain() {
         None => "E C L I V E N   C O D E",
@@ -96,6 +98,9 @@ fn render_landing(frame: &mut Frame<'_>, app: &App, area: Rect, update_height: u
         Some(SwarmDomain::Security(SecuritySubMode::ThreatModel)) => {
             "E C L I V E N   ·   T H R E A T   M O D E L"
         }
+        Some(SwarmDomain::Competitive) => "E C L I V E N   ·   C O M P E T I T I V E",
+        Some(SwarmDomain::Collaborative) => "E C L I V E N   ·   C O L L A B O R A T I V E",
+        Some(SwarmDomain::RedEclipse) => "E C L I V E N   ·   R E D   E C L I P S E",
     };
     frame.render_widget(
         Paragraph::new(Span::styled(hero_title, title_style)).alignment(Alignment::Center),
@@ -298,6 +303,11 @@ fn build_mode_pills(app: &App) -> Line<'static> {
     } else {
         ("○", Theme::tab_inactive())
     };
+    let (team_dot, team_style) = if app.active_section == WorkspaceSection::SwarmTeam {
+        ("●", Theme::tab_active_code())
+    } else {
+        ("○", Theme::tab_inactive())
+    };
 
     Line::from(vec![
         Span::styled(format!("{c_dot} Chat"), c_style),
@@ -310,6 +320,11 @@ fn build_mode_pills(app: &App) -> Line<'static> {
                 app.security_sub_mode.as_str()
             ),
             sec_style,
+        ),
+        Span::styled("   ", Theme::footer_hint()),
+        Span::styled(
+            format!("{team_dot} Swarm: {}", app.team_domain.as_str()),
+            team_style,
         ),
     ])
 }
@@ -375,15 +390,17 @@ fn render_transcript(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 badge,
                 content,
             } => {
-                let heading = if matches!(domain, SwarmDomain::Code) {
-                    format!("  ★ [{badge}] Combined Best Solution")
-                } else {
-                    format!("  ★ [{badge}] Consolidated Security Report")
+                let heading = match domain {
+                    SwarmDomain::Code => format!("  ★ [{badge}] Combined Best Solution"),
+                    SwarmDomain::Competitive => format!("  ★ [{badge}] Verified Winner"),
+                    SwarmDomain::Collaborative => format!("  ★ [{badge}] Integrated Project"),
+                    SwarmDomain::RedEclipse => format!("  ★ [{badge}] Red Eclipse Report"),
+                    SwarmDomain::Security(_) => format!("  ★ [{badge}] Consolidated Security Report"),
                 };
                 lines.push(Line::from(Span::styled(heading, Theme::swarm_badge(*domain))));
                 let rail_style = match domain {
-                    SwarmDomain::Code => Theme::border_code(),
-                    SwarmDomain::Security(_) => Theme::border_security(),
+                    SwarmDomain::Security(_) | SwarmDomain::RedEclipse => Theme::border_security(),
+                    _ => Theme::border_code(),
                 };
                 for l in content.lines() {
                     lines.push(Line::from(vec![
@@ -515,10 +532,11 @@ fn render_swarm_sidebar(frame: &mut Frame<'_>, app: &App, domain: SwarmDomain, a
     }
 
     lines.push(Line::from(""));
-    let team_heading = if matches!(domain, SwarmDomain::Code) {
-        "Candidate Coders"
-    } else {
-        "Security Specialists"
+    let team_heading = match domain {
+        SwarmDomain::Code | SwarmDomain::Competitive => "Candidate Coders",
+        SwarmDomain::Collaborative => "Area Owners (run in order)",
+        SwarmDomain::RedEclipse => "Red Team / Blue Team",
+        SwarmDomain::Security(_) => "Security Specialists",
     };
     lines.push(Line::from(Span::styled(team_heading, Theme::tool_label())));
 
@@ -533,6 +551,7 @@ fn render_swarm_sidebar(frame: &mut Frame<'_>, app: &App, domain: SwarmDomain, a
                 (spin, d, Theme::status_running())
             }
             SwarmAgentStatus::Done => ("✓", "done".to_string(), Theme::status_done()),
+            SwarmAgentStatus::Skipped => ("–", "not needed".to_string(), Theme::footer_hint()),
             SwarmAgentStatus::Failed(_) => ("✗", "error".to_string(), Theme::error_text()),
         };
 
@@ -549,10 +568,11 @@ fn render_swarm_sidebar(frame: &mut Frame<'_>, app: &App, domain: SwarmDomain, a
     }
 
     lines.push(Line::from(""));
-    let lead_heading = if matches!(domain, SwarmDomain::Code) {
-        "Master Combiner"
-    } else {
-        "Security Coordinator"
+    let lead_heading = match domain {
+        SwarmDomain::Code => "Master Combiner",
+        SwarmDomain::Competitive => "Arbiter (objective verification)",
+        SwarmDomain::Collaborative => "Tech Lead",
+        SwarmDomain::RedEclipse | SwarmDomain::Security(_) => "Security Coordinator",
     };
     lines.push(Line::from(Span::styled(lead_heading, Theme::tool_label())));
 
@@ -566,6 +586,7 @@ fn render_swarm_sidebar(frame: &mut Frame<'_>, app: &App, domain: SwarmDomain, a
             (spin, d, Theme::status_running())
         }
         SwarmAgentStatus::Done => ("✓", "done".to_string(), Theme::status_done()),
+        SwarmAgentStatus::Skipped => ("–", "skipped".to_string(), Theme::footer_hint()),
         SwarmAgentStatus::Failed(_) => ("✗", "error".to_string(), Theme::error_text()),
     };
 
@@ -579,8 +600,8 @@ fn render_swarm_sidebar(frame: &mut Frame<'_>, app: &App, domain: SwarmDomain, a
     ]));
 
     let border_style = match domain {
-        SwarmDomain::Code => Theme::border_code(),
-        SwarmDomain::Security(_) => Theme::border_security(),
+        SwarmDomain::Security(_) | SwarmDomain::RedEclipse => Theme::border_security(),
+        _ => Theme::border_code(),
     };
 
     let block = Block::default()
@@ -602,6 +623,7 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
             WorkspaceSection::Chat => Theme::border_active(),
             WorkspaceSection::SwarmCode => Theme::border_code(),
             WorkspaceSection::SwarmSecurity => Theme::border_security(),
+            WorkspaceSection::SwarmTeam => Theme::border_code(),
         }
     };
 
@@ -624,6 +646,15 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
                 Some(SwarmDomain::Security(SecuritySubMode::ThreatModel)) => {
                     " ❯ Security Threat Model (STRIDE · F4 switch) ".to_string()
                 }
+                Some(SwarmDomain::Competitive) => {
+                    " ❯ Competitive Swarm (isolated candidates -> tests pick winner) ".to_string()
+                }
+                Some(SwarmDomain::Collaborative) => {
+                    " ❯ Collaborative Swarm (DB -> API -> UI -> SEC -> QA) ".to_string()
+                }
+                Some(SwarmDomain::RedEclipse) => {
+                    " ❯ Red Eclipse (red attacks · blue hardens · verified rounds) ".to_string()
+                }
             }
         };
         block = block.title(title);
@@ -643,6 +674,15 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
             }
             Some(SwarmDomain::Security(SecuritySubMode::ThreatModel)) => {
                 "❯ Run STRIDE threat modeling & hardening review..."
+            }
+            Some(SwarmDomain::Competitive) => {
+                "❯ Describe the task: each candidate implements it, tests choose the winner..."
+            }
+            Some(SwarmDomain::Collaborative) => {
+                "❯ Describe the project: it is split across database, backend, frontend, security, testing..."
+            }
+            Some(SwarmDomain::RedEclipse) => {
+                "❯ What should the red team attack? (/scope src) Blue team fixes each round..."
             }
         };
         frame.render_widget(
@@ -1246,6 +1286,7 @@ Slash Commands:
   /connect custom <command> [args...]
   /swarm | /swarm code [folder]
   /swarm security defense [folder] | /swarm security threat [folder]
+  /swarm competitive | collaborative | red-eclipse [folder]
   /swarm off | /scope <folder|off>
   /update [check] | /provider <name> | /model <name>
   /approval <ask|auto-edit|auto-all> | /status | /clear | /quit

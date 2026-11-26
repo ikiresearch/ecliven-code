@@ -226,6 +226,10 @@ pub struct AppConfig {
     /// `provider/model` refs for Swarm workers (round-robin); empty = active model.
     pub swarm_worker_models: Vec<String>,
     pub swarm_lead_model: Option<String>,
+    /// Objective check used by competitive / Red Eclipse swarms (auto-detected if unset).
+    pub swarm_verify_command: Option<String>,
+    pub swarm_verify_timeout_secs: u64,
+    pub swarm_rounds: usize,
     pub knowledge: KnowledgeConfig,
     pub workspace_trust: trust::WorkspaceTrust,
     pub cli_overrides: CliOverrides,
@@ -259,6 +263,9 @@ impl Default for KnowledgeConfig {
 struct FileSwarmConfig {
     workers: Option<Vec<String>>,
     lead: Option<String>,
+    verify: Option<String>,
+    verify_timeout_secs: Option<u64>,
+    rounds: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -346,6 +353,9 @@ impl FileConfig {
                 material.push(format!("mcp:{name}:{env:?}:{headers:?}"));
             }
         }
+        if let Some(cmd) = self.swarm.as_ref().and_then(|s| s.verify.as_ref()) {
+            shown.push(format!("swarm.verify = {cmd} (runs a program)"));
+        }
         if let Some(p) = &self.providers {
             let entries = [
                 ("anthropic", &p.anthropic),
@@ -382,6 +392,9 @@ impl FileConfig {
         }
         self.sandbox_writable_roots = None;
         self.mcp_servers = None;
+        if let Some(swarm) = &mut self.swarm {
+            swarm.verify = None;
+        }
         if let Some(p) = &mut self.providers {
             for e in [
                 &mut p.anthropic,
@@ -472,6 +485,9 @@ impl AppConfig {
             saver_mode: false,
             swarm_worker_models: Vec::new(),
             swarm_lead_model: None,
+            swarm_verify_command: None,
+            swarm_verify_timeout_secs: 600,
+            swarm_rounds: 2,
             knowledge: KnowledgeConfig::default(),
             workspace_trust: trust::WorkspaceTrust::default(),
             cli_overrides: CliOverrides::default(),
@@ -718,6 +734,15 @@ impl AppConfig {
             }
             if swarm.lead.is_some() {
                 self.swarm_lead_model = swarm.lead;
+            }
+            if swarm.verify.is_some() {
+                self.swarm_verify_command = swarm.verify;
+            }
+            if let Some(secs) = swarm.verify_timeout_secs {
+                self.swarm_verify_timeout_secs = secs;
+            }
+            if let Some(rounds) = swarm.rounds {
+                self.swarm_rounds = rounds.clamp(1, 3);
             }
         }
         if let Some(servers) = parsed.mcp_servers {
