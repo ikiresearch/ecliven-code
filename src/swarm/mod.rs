@@ -92,6 +92,8 @@ impl Default for SwarmOptions {
 pub struct SwarmEngine {
     domain: SwarmDomain,
     provider: Arc<dyn LlmProvider>,
+    worker_providers: Vec<Arc<dyn LlmProvider>>,
+    lead_provider: Option<Arc<dyn LlmProvider>>,
     full_tools: Arc<ToolRegistry>,
     read_only_tools: Arc<ToolRegistry>,
     tool_ctx: ToolContext,
@@ -116,10 +118,32 @@ impl SwarmEngine {
         Self {
             domain,
             provider,
+            worker_providers: Vec::new(),
+            lead_provider: None,
             full_tools,
             read_only_tools: Arc::new(ToolRegistry::read_only_registry()),
             tool_ctx,
             options,
+        }
+    }
+
+    /// Uses different models (possibly from different labs) per agent:
+    /// workers are assigned round-robin, the lead falls back to the base provider.
+    pub fn with_providers(
+        mut self,
+        workers: Vec<Arc<dyn LlmProvider>>,
+        lead: Option<Arc<dyn LlmProvider>>,
+    ) -> Self {
+        self.worker_providers = workers;
+        self.lead_provider = lead;
+        self
+    }
+
+    fn worker_provider(&self, idx: usize) -> Arc<dyn LlmProvider> {
+        if self.worker_providers.is_empty() {
+            Arc::clone(&self.provider)
+        } else {
+            Arc::clone(&self.worker_providers[idx % self.worker_providers.len()])
         }
     }
 
@@ -166,8 +190,9 @@ impl SwarmEngine {
         let specialists = self.domain.specialists();
         let prior_context = summarize_recent_history(session);
 
-        let worker_futures = specialists.iter().copied().map(|role| {
-            let provider = Arc::clone(&self.provider);
+        let mixed_models = !self.worker_providers.is_empty();
+        let worker_futures = specialists.iter().copied().enumerate().map(|(idx, role)| {
+            let provider = self.worker_provider(idx);
             let tools = Arc::clone(&self.read_only_tools);
             let tool_ctx = self.tool_ctx.clone();
             let options = self.options.clone();
@@ -180,6 +205,7 @@ impl SwarmEngine {
             tokio::spawn(async move {
                 run_worker(
                     role,
+                    mixed_models,
                     provider,
                     tools,
                     tool_ctx,
@@ -236,7 +262,7 @@ impl SwarmEngine {
         let lead_system_prompt = format!("{base_prompt}\n\n{}", self.domain.lead_directive());
 
         let lead_engine = AgentEngine::with_system_prompt(
-            Arc::clone(&self.provider),
+            Arc::clone(self.lead_provider.as_ref().unwrap_or(&self.provider)),
             Arc::clone(&self.full_tools),
             self.tool_ctx.clone(),
             AgentOptions {
@@ -305,6 +331,7 @@ impl SwarmEngine {
 #[allow(clippy::too_many_arguments)]
 async fn run_worker(
     role: SwarmAgentRole,
+    show_model: bool,
     provider: Arc<dyn LlmProvider>,
     read_only_tools: Arc<ToolRegistry>,
     tool_ctx: ToolContext,
@@ -315,9 +342,14 @@ async fn run_worker(
     user_input: String,
     event_tx: mpsc::UnboundedSender<SwarmEvent>,
 ) -> WorkerOutcome {
+    let agent_name = if show_model {
+        format!("{} [{}]", role.name, provider.model())
+    } else {
+        role.name.to_string()
+    };
     let _ = event_tx.send(SwarmEvent::WorkerStatus {
         agent_id: role.id.to_string(),
-        agent_name: role.name.to_string(),
+        agent_name: agent_name.clone(),
         badge: role.badge.to_string(),
         status: SwarmAgentStatus::Running { active_tool: None },
     });
@@ -351,7 +383,9 @@ async fn run_worker(
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     let status_tx = event_tx.clone();
+    let collect_name = agent_name.clone();
     let collect_handle = tokio::spawn(async move {
+        let agent_name = collect_name;
         let mut last_content = String::new();
         let mut last_error: Option<String> = None;
 
@@ -360,7 +394,7 @@ async fn run_worker(
                 AgentEvent::ToolStarted { tool_name, .. } => {
                     let _ = status_tx.send(SwarmEvent::WorkerStatus {
                         agent_id: role.id.to_string(),
-                        agent_name: role.name.to_string(),
+                        agent_name: agent_name.clone(),
                         badge: role.badge.to_string(),
                         status: SwarmAgentStatus::Running {
                             active_tool: Some(tool_name),
@@ -390,20 +424,20 @@ async fn run_worker(
     if let Some(ref err) = error {
         let _ = event_tx.send(SwarmEvent::WorkerStatus {
             agent_id: role.id.to_string(),
-            agent_name: role.name.to_string(),
+            agent_name: agent_name.clone(),
             badge: role.badge.to_string(),
             status: SwarmAgentStatus::Failed(err.clone()),
         });
     } else {
         let _ = event_tx.send(SwarmEvent::WorkerStatus {
             agent_id: role.id.to_string(),
-            agent_name: role.name.to_string(),
+            agent_name: agent_name.clone(),
             badge: role.badge.to_string(),
             status: SwarmAgentStatus::Done,
         });
         let _ = event_tx.send(SwarmEvent::WorkerReport {
             agent_id: role.id.to_string(),
-            agent_name: role.name.to_string(),
+            agent_name: agent_name.clone(),
             badge: role.badge.to_string(),
             content: report.clone(),
             usage: Some(usage.clone()),

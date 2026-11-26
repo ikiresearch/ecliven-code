@@ -4,6 +4,7 @@ pub mod models;
 pub mod ollama;
 pub mod openai;
 pub mod registry;
+pub mod router;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

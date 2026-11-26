@@ -185,6 +185,9 @@ mod tests {
             bytes: vec![0, 159, 146, 150],
         };
         let json = serde_json::to_string(&original).unwrap();
-        assert_eq!(serde_json::from_str::<FileOriginal>(&json).unwrap(), original);
+        assert_eq!(
+            serde_json::from_str::<FileOriginal>(&json).unwrap(),
+            original
+        );
     }
 }

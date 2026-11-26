@@ -1176,8 +1176,21 @@ impl App {
             .entries
             .push(ChatEntry::User(prompt.clone()));
 
-        let provider = match build_provider(&self.config) {
-            Ok(p) => p,
+        let is_swarm = self.active_swarm_domain().is_some();
+        let selected = if is_swarm {
+            build_provider(&self.config).map(|p| (p, None))
+        } else {
+            crate::ai::router::select_provider(&self.config, &prompt)
+        };
+        let provider = match selected {
+            Ok((p, note)) => {
+                if let Some(note) = note {
+                    self.section_state_mut(section)
+                        .entries
+                        .push(ChatEntry::System(note));
+                }
+                p
+            }
             Err(err) => {
                 self.section_state_mut(section)
                     .entries
@@ -1213,20 +1226,28 @@ impl App {
         if let Some(domain) = self.active_swarm_domain() {
             self.section_state_mut(section).reset_roster_idle();
 
+            let mixed = crate::ai::router::swarm_providers(&self.config);
+            for err in &mixed.errors {
+                self.section_state_mut(section)
+                    .entries
+                    .push(ChatEntry::Error(format!("Swarm model skipped: {err}")));
+            }
+            let saver = self.config.saver_mode;
             let engine = SwarmEngine::new(
                 domain,
                 provider,
                 Arc::clone(&self.tools),
                 tool_ctx,
                 SwarmOptions {
-                    max_tokens: self.config.max_tokens,
+                    max_tokens: if saver { self.config.max_tokens.min(2048) } else { self.config.max_tokens },
                     temperature: self.config.temperature,
-                    worker_max_iterations: 8,
+                    worker_max_iterations: if saver { 4 } else { 8 },
                     lead_max_iterations: self.config.max_tool_iterations,
                     approval_mode: self.config.approval_mode,
                     target_scope,
                 },
-            );
+            )
+            .with_providers(mixed.workers, mixed.lead);
 
             tokio::spawn(async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<SwarmEvent>();
@@ -1257,8 +1278,9 @@ impl App {
             )
             .with_compaction(
                 self.config.context_window_tokens(),
-                self.config.auto_compact_percent,
-            );
+                self.config.effective_compact_percent(),
+            )
+            .with_saver_mode(self.config.saver_mode);
 
             tokio::spawn(async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -1617,6 +1639,9 @@ impl App {
                      /sessions                                       List saved sessions for this workspace\n\
                      /resume [id|last]                               Resume a saved session in this tab\n\
                      /mcp                                            Show MCP servers and their tools\n\
+                     /router [on|off]                                Auto-pick model by difficulty, cost, specialty\n\
+                     /saver [on|off]                                 Saver mode: minimize tokens and cost\n\
+                     /swarm-models                                   Show models used by Swarm agents\n\
                      /status                                         Show session & provider status\n\
                      /clear                                          Clear current tab history\n\
                      /quit                                           Exit Ecliven Code\n\n\
@@ -1933,6 +1958,67 @@ impl App {
                     ),
                 },
             },
+            "/router" => {
+                match arg1 {
+                    Some("on") => self.config.router.enabled = true,
+                    Some("off") => self.config.router.enabled = false,
+                    Some(_) => return self.push_error("Usage: /router [on|off]"),
+                    None => {}
+                }
+                let r = &self.config.router;
+                let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+                let mut msg = format!(
+                    "Router: {}\n  cheap: {}\n  standard: {}\n  strong: {}",
+                    if r.enabled { "on" } else { "off" },
+                    show(&r.cheap),
+                    show(&r.standard),
+                    show(&r.strong)
+                );
+                for (name, model) in &r.specialties {
+                    msg.push_str(&format!("\n  {name}: {model}"));
+                }
+                if r.cheap.is_none() && r.standard.is_none() && r.strong.is_none() {
+                    msg.push_str("\nConfigure [router] in .ecliven.toml with provider/model refs.");
+                }
+                self.push_system(msg);
+            }
+            "/saver" => {
+                match arg1 {
+                    Some("on") => self.config.saver_mode = true,
+                    Some("off") => self.config.saver_mode = false,
+                    Some(_) => return self.push_error("Usage: /saver [on|off]"),
+                    None => {}
+                }
+                let msg = if self.config.saver_mode {
+                    format!(
+                        "Saver mode on: one model tier cheaper{}, max {} output tokens, tool output capped, compaction at {}%.",
+                        self.config
+                            .router
+                            .cheap
+                            .as_ref()
+                            .map(|m| format!(" (cheap model {m})"))
+                            .unwrap_or_default(),
+                        self.config.max_tokens.min(2048),
+                        self.config.effective_compact_percent()
+                    )
+                } else {
+                    "Saver mode off.".to_string()
+                };
+                self.push_system(msg);
+            }
+            "/swarm-models" => {
+                let workers = if self.config.swarm_worker_models.is_empty() {
+                    "active model".to_string()
+                } else {
+                    self.config.swarm_worker_models.join(", ")
+                };
+                let lead = self
+                    .config
+                    .swarm_lead_model
+                    .clone()
+                    .unwrap_or_else(|| "active model".into());
+                self.push_system(format!("Swarm workers: {workers}\nSwarm lead: {lead}"));
+            }
             "/quit" | "/exit" => {
                 self.should_quit = true;
             }
