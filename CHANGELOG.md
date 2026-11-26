@@ -2,6 +2,12 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [versionado semántico](https://semver.org/lang/es/).
 
+## [Sin publicar]
+
+### Corregido
+
+- Linux: nuevo binario estático (`x86_64-unknown-linux-musl`) que funciona en cualquier distribución, sin depender de la versión de glibc. `install.sh` lo usa por defecto y, en releases anteriores, vuelve al binario glibc. Este último se compila ahora en Ubuntu 22.04 (glibc 2.35).
+
 ## [0.4.0] - 2026-11-26
 
 ### Añadido

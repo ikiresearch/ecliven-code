@@ -21,7 +21,13 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: .exe
             archive: zip
+          # Static binary: runs on any x86_64 Linux regardless of glibc version.
           - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: ""
+            archive: tar.gz
+          # Kept for older installers; built on the oldest supported runner (glibc 2.35).
+          - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             ext: ""
             archive: tar.gz
@@ -44,6 +50,10 @@ jobs:
         with:
           toolchain: stable
           targets: ${{ matrix.target }}
+
+      - name: Install musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Build release binary
         run: cargo build --release --locked --target ${{ matrix.target }}

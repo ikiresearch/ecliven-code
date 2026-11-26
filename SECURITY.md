@@ -60,7 +60,7 @@ Cada release publica `SHA256SUMS.txt` y una atestación de procedencia de compil
 
 ```bash
 sha256sum -c SHA256SUMS.txt --ignore-missing
-gh attestation verify ecliven-x86_64-unknown-linux-gnu.tar.gz --repo ikiresearch/ecliven-code
+gh attestation verify ecliven-x86_64-unknown-linux-musl.tar.gz --repo ikiresearch/ecliven-code
 ```
 
 ## Puerto seguro
