@@ -181,10 +181,22 @@ pub trait Tool: Send + Sync {
     async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError>;
 }
 
+/// Longest prefix of `s` that is at most `max_bytes` long and ends on a char boundary.
+pub fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut cut = max_bytes;
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    &s[..cut]
+}
+
 pub fn compact_args(args: &Value) -> String {
     let serialized = args.to_string();
     if serialized.len() > 100 {
-        format!("{}...", &serialized[..97])
+        format!("{}...", truncate_str(&serialized, 97))
     } else {
         serialized
     }
@@ -272,6 +284,15 @@ impl Default for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncation_respects_utf8_boundaries() {
+        let text = "añ".repeat(80);
+        assert_eq!(truncate_str(&text, 3), "añ");
+        assert_eq!(truncate_str(&text, 2), "a");
+        let summary = compact_args(&serde_json::json!({ "path": "ñ".repeat(120) }));
+        assert!(summary.ends_with("..."));
+    }
     use tempfile::TempDir;
 
     #[test]

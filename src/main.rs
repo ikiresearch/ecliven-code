@@ -158,8 +158,8 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
                 let found = store
                     .find(&query, &config.workspace_dir)
                     .map_err(anyhow::Error::msg)?;
-                let (_, messages) = store::load_session(&found.path).map_err(anyhow::Error::msg)?;
-                session = Session::from_messages(messages);
+                let loaded = store::load_session(&found.path).map_err(anyhow::Error::msg)?;
+                session = Session::from_loaded(loaded);
                 session.attach_recorder(store.reopen(&found));
                 eprintln!("[ecliven] Resumed session {}", found.meta.id);
             }
@@ -179,6 +179,7 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
 
     let handle = tokio::spawn(async move {
         engine.run_turn(&mut session, prompt, tx).await;
+        session
     });
 
     while let Some(event) = rx.recv().await {
@@ -217,7 +218,10 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
         }
     }
 
-    let _ = handle.await;
+    let session = handle.await.ok();
+    if let Some(err) = session.and_then(|mut s| s.take_persist_error()) {
+        eprintln!("[ecliven] Warning: session could not be saved: {err}");
+    }
     if let Some(id) = session_id {
         eprintln!("[ecliven] Session {id} saved. Continue with: ecliven resume {id}");
     }

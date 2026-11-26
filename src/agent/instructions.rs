@@ -56,11 +56,8 @@ pub fn load_instructions_with(
         }
         let mut content = trimmed.to_string();
         if content.len() > remaining {
-            let mut cut = remaining;
-            while !content.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            content.truncate(cut);
+            let keep = crate::tools::truncate_str(&content, remaining).len();
+            content.truncate(keep);
             content.push_str("\n... [truncated: instruction budget reached]");
         }
         remaining = remaining.saturating_sub(trimmed.len());

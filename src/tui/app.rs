@@ -104,6 +104,8 @@ pub struct SectionState {
     pub roster: Vec<SwarmWorkerView>,
     pub lead_status: SwarmAgentStatus,
     pub target_scope: Option<String>,
+    /// Prompt tokens reported by the latest response in this tab.
+    pub context_tokens: u32,
 }
 
 impl SectionState {
@@ -117,6 +119,7 @@ impl SectionState {
             roster: Vec::new(),
             lead_status: SwarmAgentStatus::Idle,
             target_scope: None,
+            context_tokens: 0,
         }
     }
 
@@ -131,6 +134,7 @@ impl SectionState {
             roster,
             lead_status: SwarmAgentStatus::Idle,
             target_scope,
+            context_tokens: 0,
         }
     }
 
@@ -388,10 +392,11 @@ impl App {
             Ok(f) => f,
             Err(err) => return self.push_error(err),
         };
-        let messages = match store::load_session(&found.path) {
-            Ok((_, m)) => m,
+        let loaded = match store::load_session(&found.path) {
+            Ok(l) => l,
             Err(err) => return self.push_error(err),
         };
+        let messages = loaded.messages.clone();
         let mut entries = Vec::new();
         for m in &messages {
             match m.role {
@@ -403,7 +408,7 @@ impl App {
             }
         }
         let count = messages.len();
-        let mut session = Session::from_messages(messages);
+        let mut session = Session::from_loaded(loaded);
         session.attach_recorder(store.reopen(&found));
         let st = self.active_state_mut();
         *st.session.lock().await = session;
@@ -453,12 +458,24 @@ impl App {
             return self.push_system("Nothing to undo: no file changes recorded in this tab.");
         };
         match cp.restore() {
-            Ok(paths) => {
-                let root = &self.config.workspace_dir;
-                let names: Vec<String> = paths
+            Ok(report) => {
+                let root = self.config.workspace_dir.clone();
+                let names: Vec<String> = report
+                    .restored
                     .iter()
-                    .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
+                    .map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string())
                     .collect();
+                if !report.skipped.is_empty() {
+                    let skipped: Vec<String> = report
+                        .skipped
+                        .iter()
+                        .map(|(p, why)| format!("{} ({why})", p.strip_prefix(&root).unwrap_or(p).display()))
+                        .collect();
+                    self.push_error(format!(
+                        "Could not restore (no snapshot, left untouched): {}",
+                        skipped.join(", ")
+                    ));
+                }
                 self.pending_notes.push(format!(
                     "The user undid your file changes from the turn \"{}\"; these files were restored: {}.",
                     cp.label,
@@ -585,25 +602,15 @@ impl App {
 
     pub fn context_usage(&self) -> (u32, u32, u8) {
         let max_ctx = self.config.context_window_tokens().max(1);
-        let estimated_chars: usize =
-            self.active_state()
-                .entries
-                .iter()
-                .map(|e| match e {
-                    ChatEntry::User(s)
-                    | ChatEntry::Assistant(s)
-                    | ChatEntry::System(s)
-                    | ChatEntry::Error(s) => s.len(),
-                    ChatEntry::SwarmReport { content, .. }
-                    | ChatEntry::SwarmLead { content, .. } => content.len(),
-                    ChatEntry::ToolCall { summary, .. } => summary.len(),
-                    ChatEntry::ToolResult { output, diff, .. } => {
-                        output.len() + diff.as_ref().map(|d| d.len()).unwrap_or(0)
-                    }
-                })
-                .sum();
-        let estimated_tokens = (estimated_chars / 4) as u32;
-        let used = self.total_input_tokens.max(estimated_tokens);
+        let st = self.active_state();
+        // Current conversation size, not the cumulative token counter, so the
+        // bar drops after compaction. While a turn holds the lock, use the
+        // prompt size reported by the last response.
+        let used = match st.session.try_lock() {
+            Ok(session) => crate::agent::compact::estimate_tokens("", session.messages())
+                .max(session.last_prompt_tokens()),
+            Err(_) => st.context_tokens,
+        };
         let pct = ((used as u64 * 100) / max_ctx as u64).min(100) as u8;
         (used, max_ctx, pct)
     }
@@ -1352,6 +1359,9 @@ impl App {
             }
             AgentEvent::AssistantFinished { content, usage } => {
                 let st = self.section_state_mut(section);
+                if let Some(u) = &usage {
+                    st.context_tokens = u.input_tokens;
+                }
                 st.streaming_buffer.clear();
                 if !content.trim().is_empty() {
                     st.entries.push(ChatEntry::Assistant(content));
@@ -1419,6 +1429,15 @@ impl App {
                 let st = self.section_state_mut(section);
                 st.streaming_buffer.clear();
                 st.auto_scroll = true;
+                let persist_error = st
+                    .session
+                    .try_lock()
+                    .ok()
+                    .and_then(|mut s| s.take_persist_error());
+                if let Some(err) = persist_error {
+                    st.entries
+                        .push(ChatEntry::Error(format!("Session could not be saved: {err}")));
+                }
             }
         }
     }
