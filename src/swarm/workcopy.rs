@@ -69,21 +69,25 @@ pub struct WorkCopy {
 }
 
 /// Copies regular files only: symlinks could point outside the workspace.
-pub fn snapshot(workspace: &Path) -> io::Result<WorkCopy> {
+/// `deps_from` is where dependency folders are linked from (the real workspace,
+/// also when copying from an immutable baseline copy).
+pub fn snapshot(source: &Path, deps_from: &Path) -> io::Result<WorkCopy> {
     let dir = tempfile::Builder::new()
         .prefix("ecliven-swarm-")
         .tempdir()?;
     let root = dir.path().canonicalize()?;
-    for rel in files(workspace)? {
+    for rel in files(source)? {
         let dest = root.join(&rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(workspace.join(&rel), dest)?;
+        std::fs::copy(source.join(&rel), dest)?;
     }
+    #[cfg(not(unix))]
+    let _ = deps_from;
     #[cfg(unix)]
     for name in LINK_DIRS {
-        let src = workspace.join(name);
+        let src = deps_from.join(name);
         if src.is_dir() {
             let _ = std::os::unix::fs::symlink(&src, root.join(name));
         }
@@ -186,6 +190,16 @@ pub async fn apply(ctx: &ToolContext, deltas: &[FileDelta]) -> Result<Vec<String
     }
     let mut summary = Vec::new();
     for (raw, path, d) in planned {
+        if tokio::fs::read(&path).await.ok() != d.old {
+            return Err(ToolError::Execution(format!(
+                "{raw} changed in the workspace while applying; stopped (already written: {})",
+                if summary.is_empty() {
+                    "none".to_string()
+                } else {
+                    summary.join(", ")
+                }
+            )));
+        }
         match &d.new {
             Some(bytes) => {
                 ctx.write_file_atomic(&path, bytes).await?;
@@ -198,6 +212,120 @@ pub async fn apply(ctx: &ToolContext, deltas: &[FileDelta]) -> Result<Vec<String
         }
     }
     Ok(summary)
+}
+
+/// Files that decide how tests run: a candidate must not be able to change them.
+const HARNESS_FILES: &[&str] = &[
+    "makefile",
+    "justfile",
+    "pytest.ini",
+    "conftest.py",
+    "tox.ini",
+    "noxfile.py",
+    "setup.cfg",
+    "go.work",
+    "phpunit.xml",
+    ".mocharc.js",
+    ".mocharc.json",
+    ".mocharc.yml",
+    ".mocharc.yaml",
+    "karma.conf.js",
+];
+const HARNESS_PREFIXES: &[&str] = &[
+    "jest.config.",
+    "vitest.config.",
+    "playwright.config.",
+    "cypress.config.",
+];
+/// Manifests candidates may legitimately edit (dependencies), but not their test settings.
+const MANIFESTS: &[&str] = &["cargo.toml", "package.json", "pyproject.toml"];
+
+fn file_name_lower(rel: &Path) -> String {
+    rel.file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+pub fn is_harness_file(rel: &Path) -> bool {
+    let name = file_name_lower(rel);
+    HARNESS_FILES.contains(&name.as_str())
+        || HARNESS_PREFIXES.iter().any(|p| name.starts_with(p))
+        || rel.starts_with(".cargo")
+}
+
+fn is_protected(rel: &Path, existed: bool) -> bool {
+    is_harness_file(rel) || (existed && is_test_path(rel))
+}
+
+#[derive(Debug, Default)]
+pub struct Guarded {
+    /// Changes left after restoring protected files.
+    pub deltas: Vec<FileDelta>,
+    /// Protected files put back to their baseline state in the copy.
+    pub reverted: Vec<String>,
+    /// Manifests whose test settings changed: the candidate is disqualified.
+    pub tampered: Vec<String>,
+}
+
+/// Restores existing tests and test-runner configuration in `copy` from the
+/// baseline, so a candidate cannot weaken the checks it is scored with.
+pub fn guard_harness(copy: &Path, deltas: Vec<FileDelta>) -> io::Result<Guarded> {
+    let mut out = Guarded::default();
+    for d in deltas {
+        let rel = d.rel.display().to_string();
+        if is_protected(&d.rel, d.old.is_some()) {
+            let target = copy.join(&d.rel);
+            match &d.old {
+                Some(bytes) => {
+                    if let Some(parent) = target.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(&target, bytes)?;
+                }
+                None => std::fs::remove_file(&target)?,
+            }
+            out.reverted.push(rel);
+            continue;
+        }
+        if MANIFESTS.contains(&file_name_lower(&d.rel).as_str()) {
+            let diff = render_diff(std::slice::from_ref(&d));
+            let touches_tests = diff
+                .lines()
+                .filter(|l| {
+                    (l.starts_with('+') && !l.starts_with("+++"))
+                        || (l.starts_with('-') && !l.starts_with("---"))
+                })
+                .any(|l| l.to_ascii_lowercase().contains("test"));
+            if touches_tests {
+                out.tampered.push(rel);
+            }
+        }
+        out.deltas.push(d);
+    }
+    Ok(out)
+}
+
+/// Existing tests and harness files, to detect later edits in the real workspace.
+pub fn protected_files(root: &Path) -> io::Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    let mut out = std::collections::BTreeMap::new();
+    for rel in files(root)? {
+        if is_protected(&rel, true) {
+            out.insert(rel.clone(), std::fs::read(root.join(&rel))?);
+        }
+    }
+    Ok(out)
+}
+
+/// Protected files from `before` that were modified or deleted.
+pub fn protected_changes(
+    root: &Path,
+    before: &std::collections::BTreeMap<PathBuf, Vec<u8>>,
+) -> Vec<String> {
+    before
+        .iter()
+        .filter(|(rel, bytes)| std::fs::read(root.join(rel)).ok().as_ref() != Some(*bytes))
+        .map(|(rel, _)| rel.display().to_string())
+        .collect()
 }
 
 pub fn detect_verify_command(root: &Path) -> Option<String> {
@@ -287,7 +415,7 @@ mod tests {
         std::fs::write(ws.path().join("target/debug/big"), "bin").unwrap();
         std::fs::write(ws.path().join("Cargo.toml"), "[package]\n").unwrap();
 
-        let copy = snapshot(ws.path()).unwrap();
+        let copy = snapshot(ws.path(), ws.path()).unwrap();
         assert!(!copy.root.join("target").exists());
         assert_eq!(
             detect_verify_command(&copy.root).as_deref(),
@@ -322,6 +450,54 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(ws.path().join("a.txt")).unwrap(),
             "two"
+        );
+    }
+
+    #[test]
+    fn guard_restores_tests_and_flags_test_config_changes() {
+        let ws = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(ws.path().join("tests")).unwrap();
+        std::fs::create_dir_all(ws.path().join("src")).unwrap();
+        std::fs::write(ws.path().join("tests/check.sh"), "grep -q good out\n").unwrap();
+        std::fs::write(ws.path().join("src/a.rs"), "a\n").unwrap();
+        std::fs::write(
+            ws.path().join("package.json"),
+            "{\n  \"scripts\": { \"test\": \"jest\" }\n}\n",
+        )
+        .unwrap();
+        let copy = snapshot(ws.path(), ws.path()).unwrap();
+        std::fs::write(copy.root.join("tests/check.sh"), "exit 0\n").unwrap();
+        std::fs::write(copy.root.join("conftest.py"), "skip\n").unwrap();
+        std::fs::write(copy.root.join("tests/new_test.rs"), "t\n").unwrap();
+        std::fs::write(copy.root.join("src/a.rs"), "b\n").unwrap();
+        std::fs::write(
+            copy.root.join("package.json"),
+            "{\n  \"scripts\": { \"test\": \"exit 0\" }\n}\n",
+        )
+        .unwrap();
+
+        let deltas = changes(ws.path(), &copy.root).unwrap();
+        let g = guard_harness(&copy.root, deltas).unwrap();
+        assert_eq!(g.reverted, vec!["conftest.py", "tests/check.sh"]);
+        assert_eq!(g.tampered, vec!["package.json"]);
+        let kept: Vec<String> = g
+            .deltas
+            .iter()
+            .map(|d| d.rel.display().to_string())
+            .collect();
+        assert_eq!(kept, vec!["package.json", "src/a.rs", "tests/new_test.rs"]);
+        assert_eq!(
+            std::fs::read_to_string(copy.root.join("tests/check.sh")).unwrap(),
+            "grep -q good out\n"
+        );
+        assert!(!copy.root.join("conftest.py").exists());
+
+        let before = protected_files(ws.path()).unwrap();
+        assert!(protected_changes(ws.path(), &before).is_empty());
+        std::fs::write(ws.path().join("tests/check.sh"), "exit 0\n").unwrap();
+        assert_eq!(
+            protected_changes(ws.path(), &before),
+            vec!["tests/check.sh"]
         );
     }
 }

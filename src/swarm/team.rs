@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::swarm::domain::COLLABORATIVE_SPECIALISTS;
-use crate::swarm::workcopy::{self, FileDelta, Verification};
+use crate::swarm::workcopy::{self, Verification};
 use crate::tools::policy::{self, Decision};
 use crate::tools::sandbox::SandboxMode;
 use crate::tools::ToolRisk;
@@ -172,6 +172,7 @@ impl SwarmEngine {
         tools: Arc<ToolRegistry>,
         ctxs: Vec<ToolContext>,
         approval_mode: ApprovalMode,
+        provider_sandbox: SandboxMode,
         scope: Option<String>,
         prompt: String,
         event_tx: &mpsc::UnboundedSender<SwarmEvent>,
@@ -187,10 +188,11 @@ impl SwarmEngine {
             .map(|(idx, (role, ctx))| {
                 let mut options = self.options.clone();
                 options.approval_mode = approval_mode;
+                let provider = self.worker_provider_in(idx, &ctx.workspace_root, provider_sandbox);
                 tokio::spawn(run_worker(
                     role,
                     mixed,
-                    self.worker_provider(idx),
+                    provider,
                     Arc::clone(&tools),
                     ctx,
                     options,
@@ -337,20 +339,18 @@ impl SwarmEngine {
         );
         let snapshot_ws = ws.clone();
         let n = roles.len();
-        let copies = tokio::task::spawn_blocking(move || {
-            (0..n)
-                .map(|_| workcopy::snapshot(&snapshot_ws))
-                .collect::<std::io::Result<Vec<_>>>()
+        let snapshots = tokio::task::spawn_blocking(move || {
+            let baseline = workcopy::snapshot(&snapshot_ws, &snapshot_ws)?;
+            let copies = (0..n)
+                .map(|_| workcopy::snapshot(&baseline.root, &snapshot_ws))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            Ok::<_, std::io::Error>((baseline, copies))
         })
-        .await;
-        let copies = match copies {
-            Ok(Ok(copies)) => copies,
-            Ok(Err(err)) => {
-                let _ = event_tx.send(SwarmEvent::Error(format!(
-                    "Could not create isolated copies: {err}"
-                )));
-                return;
-            }
+        .await
+        .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| e.to_string()));
+        let (baseline, copies) = match snapshots {
+            Ok(s) => s,
             Err(err) => {
                 let _ = event_tx.send(SwarmEvent::Error(format!(
                     "Could not create isolated copies: {err}"
@@ -374,42 +374,65 @@ impl SwarmEngine {
                 Arc::new(ToolRegistry::isolated_edit_registry()),
                 ctxs.clone(),
                 ApprovalMode::AutoAll,
+                SandboxMode::WorkspaceWrite,
                 scope,
                 user_input.clone(),
                 event_tx,
             )
             .await;
 
+        // Compared with the immutable baseline, never with the live workspace.
         let roots: Vec<_> = copies.iter().map(|c| c.root.clone()).collect();
-        let diff_ws = ws.clone();
-        let deltas: Vec<Vec<FileDelta>> = tokio::task::spawn_blocking(move || {
+        let base_root = baseline.root.clone();
+        let guarded: Vec<workcopy::Guarded> = tokio::task::spawn_blocking(move || {
             roots
                 .iter()
-                .map(|r| workcopy::changes(&diff_ws, r).unwrap_or_default())
+                .map(|r| {
+                    workcopy::changes(&base_root, r)
+                        .and_then(|d| workcopy::guard_harness(r, d))
+                        .unwrap_or_default()
+                })
                 .collect()
         })
         .await
-        .unwrap_or_default();
+        .unwrap_or_else(|_| (0..n).map(|_| workcopy::Guarded::default()).collect());
 
         let verify_cmd = self.verify_command();
         let mut results: Vec<Option<Verification>> = vec![None; n];
+        let no_win = "a candidate can only win by passing verification";
         let verify_note = match &verify_cmd {
-            None => "No verification command found (set [swarm] verify); candidates ranked by change size only.".to_string(),
+            None => format!("No verification command found (set [swarm] verify): {no_win}."),
             Some(cmd) => {
                 let ask = format!("Verify {n} candidates with `{cmd}` in their isolated copies");
-                match self.authorize(event_tx, "run_command", ToolRisk::ShellExec, ask, None).await {
-                    Err(reason) => format!("Verification skipped: {reason}."),
+                match self
+                    .authorize(event_tx, "run_command", ToolRisk::ShellExec, ask, None)
+                    .await
+                {
+                    Err(reason) => format!("Verification skipped ({reason}): {no_win}."),
                     Ok(()) => {
                         let target = std::env::temp_dir().join("ecliven-swarm-target");
                         for (i, role) in roles.iter().copied().enumerate() {
-                            if deltas.get(i).is_none_or(|d| d.is_empty()) {
+                            let g = &guarded[i];
+                            if g.deltas.is_empty() || !g.tampered.is_empty() {
                                 continue;
                             }
                             let name = self.agent_name(i, role);
-                            status(event_tx, role, &name, SwarmAgentStatus::Running {
-                                active_tool: Some(format!("verify: {cmd}")),
-                            });
-                            let v = workcopy::verify(&ctxs[i], &ctxs[i].workspace_root, cmd, self.verify_timeout(), Some(&target)).await;
+                            status(
+                                event_tx,
+                                role,
+                                &name,
+                                SwarmAgentStatus::Running {
+                                    active_tool: Some(format!("verify: {cmd}")),
+                                },
+                            );
+                            let v = workcopy::verify(
+                                &ctxs[i],
+                                &ctxs[i].workspace_root,
+                                cmd,
+                                self.verify_timeout(),
+                                Some(&target),
+                            )
+                            .await;
                             let st = if v.passed {
                                 SwarmAgentStatus::Done
                             } else {
@@ -418,7 +441,7 @@ impl SwarmEngine {
                             status(event_tx, role, &name, st);
                             results[i] = Some(v);
                         }
-                        format!("Verification: `{cmd}`")
+                        format!("Verification: `{cmd}`, with existing tests and test configuration restored from the initial snapshot.")
                     }
                 }
             }
@@ -430,17 +453,20 @@ impl SwarmEngine {
             lines: usize,
             files: usize,
             passed: Option<bool>,
+            eligible: bool,
         }
         let mut ranked: Vec<Entry> = (0..n)
             .map(|idx| {
-                let d = deltas.get(idx).map(Vec::as_slice).unwrap_or_default();
-                let diff = workcopy::render_diff(d);
+                let g = &guarded[idx];
+                let diff = workcopy::render_diff(&g.deltas);
+                let passed = results[idx].as_ref().map(|v| v.passed);
                 Entry {
                     idx,
                     lines: workcopy::changed_lines(&diff),
                     diff,
-                    files: d.len(),
-                    passed: results[idx].as_ref().map(|v| v.passed),
+                    files: g.deltas.len(),
+                    passed,
+                    eligible: !g.deltas.is_empty() && g.tampered.is_empty() && passed == Some(true),
                 }
             })
             .collect();
@@ -450,17 +476,31 @@ impl SwarmEngine {
                 None => 1,
                 Some(false) => 2,
             };
-            (e.files == 0, verdict, e.lines, e.idx)
+            (!e.eligible, e.files == 0, verdict, e.lines, e.idx)
         });
 
         let mut board = format!("Scoreboard. {verify_note}\n");
         for (pos, e) in ranked.iter().enumerate() {
             let role = roles[e.idx];
+            let g = &guarded[e.idx];
             let name = self.agent_name(e.idx, role);
-            let verdict = match (&results[e.idx], &verify_cmd) {
-                _ if e.files == 0 => "no changes".to_string(),
-                (Some(v), Some(cmd)) => verification_line(cmd, v),
-                _ => "not verified".to_string(),
+            let verdict = if e.files == 0 {
+                "no changes".to_string()
+            } else if !g.tampered.is_empty() {
+                format!(
+                    "disqualified: changed test configuration in {}",
+                    g.tampered.join(", ")
+                )
+            } else {
+                match (&results[e.idx], &verify_cmd) {
+                    (Some(v), Some(cmd)) => verification_line(cmd, v),
+                    _ => "not verified".to_string(),
+                }
+            };
+            let restored = if g.reverted.is_empty() {
+                String::new()
+            } else {
+                format!(" · restored protected files: {}", g.reverted.join(", "))
             };
             let failed = outcomes
                 .get(e.idx)
@@ -468,7 +508,7 @@ impl SwarmEngine {
                 .map(|err| format!(" · agent error: {}", clip(err, 120)))
                 .unwrap_or_default();
             board.push_str(&format!(
-                "{}. [{}] {name}: {verdict} · {} files, {} lines{failed}\n",
+                "{}. [{}] {name}: {verdict} · {} files, {} lines{restored}{failed}\n",
                 pos + 1,
                 role.badge,
                 e.files,
@@ -476,11 +516,10 @@ impl SwarmEngine {
             ));
         }
 
-        let winner = ranked
-            .first()
-            .filter(|e| e.files > 0 && e.passed != Some(false));
+        let winner = ranked.first().filter(|e| e.eligible);
         let applied = match winner {
-            None => "No candidate qualified: nothing was applied to the workspace.".to_string(),
+            None => "No candidate passed verification: nothing was applied to the workspace."
+                .to_string(),
             Some(w) => {
                 let badge = roles[w.idx].badge;
                 let ask = format!("Apply winning candidate [{badge}] ({} files)", w.files);
@@ -495,7 +534,7 @@ impl SwarmEngine {
                     .await
                 {
                     Err(reason) => format!("Winner [{badge}] was not applied: {reason}."),
-                    Ok(()) => match workcopy::apply(&self.tool_ctx, &deltas[w.idx]).await {
+                    Ok(()) => match workcopy::apply(&self.tool_ctx, &guarded[w.idx].deltas).await {
                         Ok(list) => format!(
                             "Applied winner [{badge}] to the workspace:\n{}",
                             list.join("\n")
@@ -524,6 +563,7 @@ impl SwarmEngine {
             reports.join("\n")
         );
         drop(copies);
+        drop(baseline);
         self.finish_report(
             session,
             &user_input,
@@ -552,6 +592,7 @@ impl SwarmEngine {
                 Arc::clone(&self.read_only_tools),
                 vec![self.tool_ctx.clone()],
                 ApprovalMode::Ask,
+                SandboxMode::ReadOnly,
                 scope.clone(),
                 user_input.clone(),
                 event_tx,
@@ -679,6 +720,7 @@ impl SwarmEngine {
                     Arc::clone(&self.read_only_tools),
                     vec![self.tool_ctx.clone(); red.len()],
                     ApprovalMode::Ask,
+                    SandboxMode::ReadOnly,
                     scope.clone(),
                     red_prompt,
                     event_tx,
@@ -706,6 +748,12 @@ impl SwarmEngine {
                 event_tx,
                 format!("Red Eclipse · round {round}/{rounds}: blue team hardens"),
             );
+            let ws_root = self.tool_ctx.workspace_root.clone();
+            let before = tokio::task::spawn_blocking(move || workcopy::protected_files(&ws_root))
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .unwrap_or_default();
             let mut blue_notes = String::new();
             for (idx, role) in &blue {
                 let mut prompt = format!("Round {round} of {rounds}. Review request:\n{user_input}\n\nRed team findings:\n{findings}\n");
@@ -752,6 +800,15 @@ impl SwarmEngine {
                     }
                 }
             };
+            let touched = workcopy::protected_changes(&self.tool_ctx.workspace_root, &before);
+            let verification = if touched.is_empty() {
+                verification
+            } else {
+                format!(
+                    "{verification} · NOT TRUSTED: existing tests or test configuration changed: {}",
+                    touched.join(", ")
+                )
+            };
             phase(
                 event_tx,
                 format!("Round {round} verification: {verification}"),
@@ -775,8 +832,40 @@ mod tests {
     use crate::ai::{AiError, CompletionRequest, CompletionResponse, ToolCall};
     use crate::tools::sandbox::SandboxPolicy;
     use async_trait::async_trait;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
 
-    struct Scripted;
+    type Rebases = Arc<Mutex<Vec<(PathBuf, SandboxMode)>>>;
+
+    fn writes(files: &[(&str, &str)]) -> CompletionResponse {
+        CompletionResponse {
+            tool_calls: files
+                .iter()
+                .enumerate()
+                .map(|(i, (path, content))| ToolCall {
+                    id: format!("w{i}"),
+                    name: "write_file".into(),
+                    arguments: serde_json::json!({ "path": path, "content": content }),
+                })
+                .collect(),
+            ..CompletionResponse::default()
+        }
+    }
+
+    fn text(t: &str) -> CompletionResponse {
+        CompletionResponse {
+            content: t.into(),
+            ..CompletionResponse::default()
+        }
+    }
+
+    /// Candidate A solves the task, B solves it wrong and rewrites the check,
+    /// C does nothing. `user_edit` simulates the user editing the real workspace mid-run.
+    #[derive(Default)]
+    struct Scripted {
+        user_edit: Option<PathBuf>,
+        rebased: Option<Rebases>,
+    }
 
     #[async_trait]
     impl LlmProvider for Scripted {
@@ -788,6 +877,16 @@ mod tests {
             "test/model"
         }
 
+        fn rebased(
+            &self,
+            dir: &std::path::Path,
+            sandbox: SandboxMode,
+        ) -> Option<Arc<dyn LlmProvider>> {
+            let seen = self.rebased.as_ref()?;
+            seen.lock().unwrap().push((dir.to_path_buf(), sandbox));
+            None
+        }
+
         async fn complete(
             &self,
             request: &CompletionRequest,
@@ -795,22 +894,16 @@ mod tests {
         ) -> Result<CompletionResponse, AiError> {
             let sys = &request.system_prompt;
             let first = request.messages.len() == 1;
-            let write = |content: &str| CompletionResponse {
-                tool_calls: vec![ToolCall {
-                    id: "w1".into(),
-                    name: "write_file".into(),
-                    arguments: serde_json::json!({ "path": "out.txt", "content": content }),
-                }],
-                ..CompletionResponse::default()
-            };
-            let text = |t: &str| CompletionResponse {
-                content: t.into(),
-                ..CompletionResponse::default()
-            };
             Ok(if sys.contains("Competing implementer A") && first {
-                write("good")
+                match &self.user_edit {
+                    Some(ws) => {
+                        std::fs::write(ws.join("README"), "user edit").unwrap();
+                        writes(&[("out.txt", "good"), ("README", "candidate")])
+                    }
+                    None => writes(&[("out.txt", "good")]),
+                }
             } else if sys.contains("Competing implementer B") && first {
-                write("bad")
+                writes(&[("out.txt", "bad"), ("tests/check.sh", "exit 0\n")])
             } else if sys.contains("Project planner") {
                 text(
                     r#"Plan: {"parts":[{"area":"api","task":"add endpoint"},{"area":"qa","task":"test it"}]}"#,
@@ -823,7 +916,12 @@ mod tests {
         }
     }
 
-    fn engine(domain: SwarmDomain, dir: &std::path::Path, verify: Option<&str>) -> SwarmEngine {
+    fn engine_with(
+        provider: Scripted,
+        domain: SwarmDomain,
+        dir: &std::path::Path,
+        verify: Option<&str>,
+    ) -> SwarmEngine {
         let ctx = ToolContext::new(dir.to_path_buf(), 10).with_sandbox(SandboxPolicy::new(
             SandboxMode::DangerFullAccess,
             true,
@@ -831,7 +929,7 @@ mod tests {
         ));
         SwarmEngine::new(
             domain,
-            Arc::new(Scripted),
+            Arc::new(provider),
             Arc::new(ToolRegistry::default_registry()),
             ctx,
             SwarmOptions {
@@ -842,6 +940,10 @@ mod tests {
                 ..SwarmOptions::default()
             },
         )
+    }
+
+    fn engine(domain: SwarmDomain, dir: &std::path::Path, verify: Option<&str>) -> SwarmEngine {
+        engine_with(Scripted::default(), domain, dir, verify)
     }
 
     async fn run(engine: SwarmEngine, prompt: &str) -> Vec<SwarmEvent> {
@@ -855,7 +957,6 @@ mod tests {
         events
     }
 
-    #[cfg(unix)]
     fn phases(events: &[SwarmEvent]) -> String {
         events
             .iter()
@@ -865,6 +966,14 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn project() -> tempfile::TempDir {
+        let ws = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(ws.path().join("tests")).unwrap();
+        std::fs::write(ws.path().join("tests/check.sh"), "grep -q good out.txt\n").unwrap();
+        std::fs::write(ws.path().join("README"), "x\n").unwrap();
+        ws
     }
 
     #[test]
@@ -882,14 +991,13 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn competitive_applies_only_the_candidate_that_passes_verification() {
-        let ws = tempfile::TempDir::new().unwrap();
-        std::fs::write(ws.path().join("README"), "x\n").unwrap();
+    async fn competitive_restores_tests_and_applies_only_a_verified_winner() {
+        let ws = project();
         let events = run(
             engine(
                 SwarmDomain::Competitive,
                 ws.path(),
-                Some("grep -q good out.txt"),
+                Some("sh tests/check.sh"),
             ),
             "create out.txt",
         )
@@ -901,6 +1009,10 @@ mod tests {
         );
         assert!(board.contains("[B]") && board.contains("FAILED"), "{board}");
         assert!(
+            board.contains("restored protected files: tests/check.sh"),
+            "{board}"
+        );
+        assert!(
             board.contains("[C]") && board.contains("no changes"),
             "{board}"
         );
@@ -909,9 +1021,86 @@ mod tests {
             std::fs::read_to_string(ws.path().join("out.txt")).unwrap(),
             "good"
         );
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, SwarmEvent::SynthesisFinished { .. })));
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("tests/check.sh")).unwrap(),
+            "grep -q good out.txt\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn competitive_never_applies_without_verification() {
+        let ws = project();
+        let events = run(
+            engine(SwarmDomain::Competitive, ws.path(), None),
+            "create out.txt",
+        )
+        .await;
+        let board = phases(&events);
+        assert!(
+            board.contains("can only win by passing verification"),
+            "{board}"
+        );
+        assert!(board.contains("nothing was applied"), "{board}");
+        assert!(!ws.path().join("out.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn competitive_does_not_overwrite_concurrent_user_edits() {
+        let ws = project();
+        let provider = Scripted {
+            user_edit: Some(ws.path().canonicalize().unwrap()),
+            ..Scripted::default()
+        };
+        // A also rewrites README in its copy, which the user edited meanwhile.
+        let events = run(
+            engine_with(
+                provider,
+                SwarmDomain::Competitive,
+                ws.path(),
+                Some("sh tests/check.sh"),
+            ),
+            "task",
+        )
+        .await;
+        let board = phases(&events);
+        assert_eq!(
+            std::fs::read_to_string(ws.path().join("README")).unwrap(),
+            "user edit"
+        );
+        assert!(!ws.path().join("out.txt").exists(), "{board}");
+        assert!(!board.contains("Applied winner"), "{board}");
+        assert!(board.contains("changed in the workspace"), "{board}");
+    }
+
+    #[tokio::test]
+    async fn cli_backends_are_rebased_into_copies_and_read_only_roles() {
+        let ws = project();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let provider = || Scripted {
+            rebased: Some(Arc::clone(&seen)),
+            ..Scripted::default()
+        };
+        let e = engine_with(provider(), SwarmDomain::Competitive, ws.path(), None);
+        let root = e.tool_ctx.workspace_root.clone();
+        run(e, "task").await;
+        {
+            let dirs = seen.lock().unwrap();
+            assert_eq!(dirs.len(), 3);
+            assert!(dirs
+                .iter()
+                .all(|(d, m)| *d != root && *m == SandboxMode::WorkspaceWrite));
+        }
+        seen.lock().unwrap().clear();
+        run(
+            engine_with(provider(), SwarmDomain::Collaborative, ws.path(), None),
+            "task",
+        )
+        .await;
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            [(root, SandboxMode::ReadOnly)]
+        );
     }
 
     #[tokio::test]
@@ -973,6 +1162,8 @@ mod tests {
             .collect();
         assert_eq!(&reports[2..], ["BLUE/FIX", "BLUE/TEST"]);
         assert!(reports[..2].iter().all(|b| b.starts_with("RED/")));
-        assert!(phases(&events).contains("Round 1 verification: `true` PASSED"));
+        let log = phases(&events);
+        assert!(log.contains("Round 1 verification: `true` PASSED"), "{log}");
+        assert!(!log.contains("NOT TRUSTED"), "{log}");
     }
 }
