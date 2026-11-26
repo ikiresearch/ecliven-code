@@ -1,0 +1,13 @@
+# Default owner for every change.
+*                        @zumberr
+
+# Security-sensitive areas: always reviewed by the maintainer.
+/src/tools/              @zumberr
+/src/config/             @zumberr
+/src/ai/cli_backend.rs   @zumberr
+/src/swarm/              @zumberr
+/install.sh              @zumberr
+/install.ps1             @zumberr
+/.github/                @zumberr
+/deny.toml               @zumberr
+/SECURITY.md             @zumberr

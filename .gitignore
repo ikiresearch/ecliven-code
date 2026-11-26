@@ -1,7 +1,10 @@
 /target
 **/*.rs.bk
 .env
-.env.local
+.env.*
+!.env.example
+*.pem
+*.key
 *.log
 .DS_Store
 Thumbs.db
