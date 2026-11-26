@@ -10,7 +10,13 @@ Agente de codigo con IA en terminal construido en Rust.
 - **Herramientas de codigo con sandbox al workspace**:
   - `read_file`, `write_file`, `edit_file` (con preview de diff unificado antes de escribir)
   - `list_dir`, `search_files` (glob), `grep_content` (regex)
-  - `run_command` (ejecucion de comandos con timeout configurable)
+  - `apply_patch` (edita, crea, mueve y borra varios archivos en un solo parche, formato de OpenAI Codex)
+  - `run_command` (ejecucion de comandos con timeout configurable y sandbox del sistema operativo)
+- **Instrucciones de proyecto (`AGENTS.md`)**: se cargan `~/.config/ecliven-code/AGENTS.md` y un `AGENTS.md` (o `AGENTS.override.md` / `CLAUDE.md`) por carpeta, desde la raiz del repo hasta el workspace (max. 32 KiB)
+- **Sesiones guardadas (JSONL)** en `<data dir>/ecliven-code/sessions/` (o `ECLIVEN_SESSIONS_DIR`): `ecliven sessions`, `ecliven resume [id]`, `--resume <id|last>`, `/sessions`, `/resume`
+- **Compactacion de contexto**: automatica al llegar a `auto_compact_percent` (80% por defecto) y manual con `/compact`
+- **Checkpoints**: antes de cada edicion se guarda el estado de los archivos; `/undo` revierte el ultimo turno y `/checkpoints` los lista
+- **Cliente MCP** (stdio y HTTP streamable): las herramientas aparecen como `mcp__<servidor>__<tool>`; `ecliven mcp` o `/mcp` las lista
 - **Politicas de aprobacion**: `ask` (default), `auto-edit`, `auto-all`
 - **Modo Swarm con dos apartados aislados**:
   - **Swarm: Code (Best-of-3 -> CHIEF)** (`--swarm code` / `/swarm code`): 3 codificadores independientes (`[CLEAN]`, `[PERF]`, `[ROBUST]`) resuelven la misma tarea en paralelo y un Agente Mayor (`[CHIEF]`) evalua y combina lo mejor de cada uno en una sola solucion optima.
@@ -117,10 +123,51 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/provider <nombre>`
 - `/model <nombre-del-modelo>`
 - `/approval <ask|auto-edit|auto-all>`
+- `/sandbox [read-only|workspace-write|danger-full-access]`
+- `/compact`
+- `/undo` (alias `/revert`) | `/checkpoints`
+- `/sessions` | `/resume [id|last]`
+- `/mcp`
 - `/status`
 - `/clear`
 - `/help`
 - `/quit`
+
+## Sandbox de comandos
+
+`run_command` corre dentro de un sandbox del sistema operativo (modos de OpenAI Codex):
+
+| Modo | Escritura permitida |
+|---|---|
+| `workspace-write` (defecto) | workspace, `/tmp`, `/dev` y `sandbox_writable_roots` |
+| `read-only` | solo `/tmp` y `/dev` |
+| `danger-full-access` | todo (sin sandbox) |
+
+- Linux: Landlock (kernel 5.13+; si el kernel no lo soporta, avisa y corre sin sandbox). `sandbox_network = false` bloquea TCP (kernel 6.7+).
+- macOS: Seatbelt (`sandbox-exec`).
+- Windows: aun sin sandbox; el resultado del comando lo indica.
+
+Se cambia con `--sandbox <modo>`, `/sandbox <modo>` o en `.ecliven.toml`.
+
+## Configuracion nueva en `.ecliven.toml`
+
+```toml
+sandbox_mode = "workspace-write"   # read-only | workspace-write | danger-full-access
+sandbox_network = true
+sandbox_writable_roots = ["/home/me/.cargo"]
+auto_compact_percent = 80          # 0 desactiva la compactacion automatica
+# context_window = 128000          # sobrescribe la ventana del proveedor
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "@example/mcp-server"]
+env = { EXAMPLE_TOKEN = "..." }
+
+[mcp_servers.remoto]
+url = "https://example.com/mcp"
+headers = { Authorization = "Bearer ..." }
+trusted = true                     # sin pedir aprobacion (por defecto se pide como run_command)
+```
 
 ## Verificacion
 

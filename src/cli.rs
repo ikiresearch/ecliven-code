@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::{ApprovalMode, CliOverrides, ProviderKind};
 use crate::swarm::domain::SwarmDomain;
+use crate::tools::sandbox::SandboxMode;
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
@@ -19,6 +20,35 @@ pub enum Commands {
     },
     /// List available models automatically discovered for the active provider or CLI
     Models,
+    /// List saved chat sessions for this workspace (use --all for every workspace)
+    Sessions {
+        #[arg(long = "all")]
+        all: bool,
+    },
+    /// Resume a saved chat session (latest one for this workspace if no ID is given)
+    Resume {
+        /// Session ID or unique prefix
+        id: Option<String>,
+    },
+    /// List configured MCP servers and the tools they expose
+    Mcp,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum CliSandboxMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl From<CliSandboxMode> for SandboxMode {
+    fn from(value: CliSandboxMode) -> Self {
+        match value {
+            CliSandboxMode::ReadOnly => SandboxMode::ReadOnly,
+            CliSandboxMode::WorkspaceWrite => SandboxMode::WorkspaceWrite,
+            CliSandboxMode::DangerFullAccess => SandboxMode::DangerFullAccess,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -119,6 +149,14 @@ pub struct Cli {
     #[arg(long = "approval", value_enum)]
     pub approval: Option<CliApprovalMode>,
 
+    /// OS sandbox for run_command (read-only, workspace-write, danger-full-access)
+    #[arg(long = "sandbox", value_enum)]
+    pub sandbox: Option<CliSandboxMode>,
+
+    /// Continue a saved session (ID, unique prefix, or "last") in the TUI or with --prompt
+    #[arg(long = "resume")]
+    pub resume: Option<String>,
+
     /// Start directly in Swarm mode (code, security, security-defense, security-threat)
     #[arg(short = 's', long = "swarm", value_enum)]
     pub swarm: Option<CliSwarmDomain>,
@@ -142,6 +180,7 @@ impl Cli {
             provider: self.provider.map(Into::into),
             model: self.model.clone(),
             approval_mode: self.approval.map(Into::into),
+            sandbox_mode: self.sandbox.map(Into::into),
         }
     }
 }

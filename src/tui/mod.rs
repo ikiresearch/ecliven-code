@@ -33,6 +33,7 @@ pub async fn run_tui(
     initial_swarm: Option<SwarmDomain>,
     initial_scope: Option<String>,
     force_setup: bool,
+    resume: Option<String>,
 ) -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
@@ -52,6 +53,10 @@ pub async fn run_tui(
         prefs_path,
         force_setup,
     );
+    app.set_session_store(crate::agent::store::SessionStore::default_store());
+    if let Some(query) = resume {
+        app.resume_session(&query).await;
+    }
     let run_result = event_loop(&mut terminal, &mut app).await;
 
     disable_raw_mode()?;
@@ -81,6 +86,7 @@ async fn event_loop(
     });
 
     app.prefetch_models(ui_tx.clone());
+    app.start_mcp(ui_tx.clone());
 
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;

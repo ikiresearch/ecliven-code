@@ -10,6 +10,8 @@ use thiserror::Error;
 
 use defaults::*;
 
+use crate::tools::sandbox::{SandboxMode, SandboxPolicy};
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error(
@@ -207,10 +209,48 @@ pub struct AppConfig {
     pub max_tool_iterations: usize,
     pub shell_timeout_secs: u64,
     pub approval_mode: ApprovalMode,
+    pub sandbox_mode: SandboxMode,
+    pub sandbox_network: bool,
+    pub sandbox_writable_roots: Vec<PathBuf>,
+    /// Compact the conversation when estimated context use reaches this percent (0 disables).
+    pub auto_compact_percent: u8,
+    /// Override of the provider's default context window in tokens.
+    pub context_window: Option<u32>,
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct McpServerConfig {
+    #[serde(skip)]
+    pub name: String,
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Trusted servers run tools without approval prompts.
+    #[serde(default)]
+    pub trusted: bool,
+    pub startup_timeout_secs: Option<u64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
+    sandbox_mode: Option<SandboxMode>,
+    sandbox_network: Option<bool>,
+    sandbox_writable_roots: Option<Vec<PathBuf>>,
+    auto_compact_percent: Option<u8>,
+    context_window: Option<u32>,
+    mcp_servers: Option<std::collections::BTreeMap<String, McpServerConfig>>,
     provider: Option<ProviderKind>,
     model: Option<String>,
     max_tokens: Option<u32>,
@@ -248,6 +288,7 @@ pub struct CliOverrides {
     pub provider: Option<ProviderKind>,
     pub model: Option<String>,
     pub approval_mode: Option<ApprovalMode>,
+    pub sandbox_mode: Option<SandboxMode>,
 }
 
 impl AppConfig {
@@ -273,7 +314,31 @@ impl AppConfig {
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             shell_timeout_secs: DEFAULT_SHELL_TIMEOUT_SECS,
             approval_mode: ApprovalMode::Ask,
+            sandbox_mode: SandboxMode::WorkspaceWrite,
+            sandbox_network: true,
+            sandbox_writable_roots: Vec::new(),
+            auto_compact_percent: DEFAULT_AUTO_COMPACT_PERCENT,
+            context_window: None,
+            mcp_servers: Vec::new(),
         }
+    }
+
+    pub fn sandbox_policy(&self) -> SandboxPolicy {
+        SandboxPolicy::new(
+            self.sandbox_mode,
+            self.sandbox_network,
+            self.sandbox_writable_roots.clone(),
+        )
+    }
+
+    pub fn context_window_tokens(&self) -> u32 {
+        self.context_window
+            .unwrap_or_else(|| self.active_provider.context_window_tokens())
+    }
+
+    pub fn tool_context(&self) -> crate::tools::ToolContext {
+        crate::tools::ToolContext::new(self.workspace_dir.clone(), self.shell_timeout_secs)
+            .with_sandbox(self.sandbox_policy())
     }
 
     pub fn load(workspace_dir: PathBuf, overrides: &CliOverrides) -> Result<Self, ConfigError> {
@@ -375,6 +440,28 @@ impl AppConfig {
         }
         if let Some(approval) = parsed.approval_mode {
             self.approval_mode = approval;
+        }
+        if let Some(mode) = parsed.sandbox_mode {
+            self.sandbox_mode = mode;
+        }
+        if let Some(network) = parsed.sandbox_network {
+            self.sandbox_network = network;
+        }
+        if let Some(roots) = parsed.sandbox_writable_roots {
+            self.sandbox_writable_roots = roots;
+        }
+        if let Some(pct) = parsed.auto_compact_percent {
+            self.auto_compact_percent = pct.min(100);
+        }
+        if let Some(window) = parsed.context_window {
+            self.context_window = Some(window);
+        }
+        if let Some(servers) = parsed.mcp_servers {
+            for (name, mut server) in servers {
+                server.name = name;
+                self.mcp_servers.retain(|s| s.name != server.name);
+                self.mcp_servers.push(server);
+            }
         }
 
         if let Some(providers) = parsed.providers {
@@ -493,6 +580,9 @@ impl AppConfig {
         if let Some(mode) = overrides.approval_mode {
             self.approval_mode = mode;
         }
+        if let Some(mode) = overrides.sandbox_mode {
+            self.sandbox_mode = mode;
+        }
     }
 }
 
@@ -520,7 +610,10 @@ mod tests {
 
         assert_eq!(cfg.active_provider, ProviderKind::OpenAi);
         assert_eq!(cfg.active_settings().model, "gpt-4.1-mini");
-        assert_eq!(cfg.active_settings().api_key.as_deref(), Some("sk-test-123"));
+        assert_eq!(
+            cfg.active_settings().api_key.as_deref(),
+            Some("sk-test-123")
+        );
     }
 
     #[test]
@@ -562,6 +655,7 @@ model = "llama3.2"
             provider: Some(ProviderKind::Ollama),
             model: Some("deepseek-coder:6.7b".into()),
             approval_mode: Some(ApprovalMode::AutoEdit),
+            sandbox_mode: None,
         };
 
         let cfg = AppConfig::load_from_sources(
@@ -577,6 +671,49 @@ model = "llama3.2"
         assert_eq!(cfg.active_settings().model, "deepseek-coder:6.7b");
         assert_eq!(cfg.max_tokens, 2048);
         assert_eq!(cfg.approval_mode, ApprovalMode::AutoEdit);
+    }
+
+    #[test]
+    fn parses_sandbox_compaction_and_mcp_servers() {
+        let mut file = NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"
+sandbox_mode = "read-only"
+sandbox_network = false
+auto_compact_percent = 70
+
+[mcp_servers.docs]
+command = "npx"
+args = ["-y", "example-mcp"]
+
+[mcp_servers.remote]
+url = "https://example.com/mcp"
+trusted = true
+"#
+        )
+        .unwrap();
+
+        let cfg = AppConfig::load_from_sources(
+            PathBuf::from("."),
+            Some(file.path()),
+            None,
+            &HashMap::new(),
+            &CliOverrides::default(),
+        )
+        .unwrap();
+
+        assert_eq!(cfg.sandbox_mode, SandboxMode::ReadOnly);
+        assert!(!cfg.sandbox_network);
+        assert_eq!(cfg.auto_compact_percent, 70);
+        assert_eq!(cfg.mcp_servers.len(), 2);
+        let docs = cfg.mcp_servers.iter().find(|s| s.name == "docs").unwrap();
+        assert_eq!(docs.command.as_deref(), Some("npx"));
+        assert!(docs.enabled && !docs.trusted);
+        assert!(cfg
+            .mcp_servers
+            .iter()
+            .any(|s| s.name == "remote" && s.trusted));
     }
 
     #[test]

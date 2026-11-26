@@ -1,15 +1,20 @@
+pub mod checkpoint;
+pub mod compact;
+pub mod instructions;
 pub mod session;
+pub mod store;
 pub mod system_prompt;
 
 use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::agent::compact::{compact_session, estimate_tokens, CompactionPolicy};
 use crate::agent::session::Session;
 use crate::agent::system_prompt::build_system_prompt;
 use crate::ai::{CompletionRequest, LlmProvider, TokenUsage};
 use crate::config::ApprovalMode;
-use crate::tools::{ToolContext, ToolOutput, ToolPreview, ToolRegistry};
+use crate::tools::{ToolContext, ToolOutput, ToolPreview, ToolRegistry, ToolRisk};
 
 pub enum AgentEvent {
     AssistantDelta(String),
@@ -31,6 +36,8 @@ pub enum AgentEvent {
         tool_name: String,
         output: ToolOutput,
     },
+    /// Informational message (e.g. context compaction).
+    Notice(String),
     Error(String),
     TurnComplete,
 }
@@ -49,6 +56,7 @@ pub struct AgentEngine {
     tool_ctx: ToolContext,
     options: AgentOptions,
     system_prompt: String,
+    compaction: Option<CompactionPolicy>,
 }
 
 impl AgentEngine {
@@ -75,6 +83,56 @@ impl AgentEngine {
             tool_ctx,
             options,
             system_prompt,
+            compaction: None,
+        }
+    }
+
+    /// Enables automatic compaction when the estimated context reaches `threshold_percent`.
+    pub fn with_compaction(mut self, context_window: u32, threshold_percent: u8) -> Self {
+        self.compaction = Some(CompactionPolicy {
+            context_window,
+            threshold_percent,
+        });
+        self
+    }
+
+    pub fn system_prompt(&self) -> &str {
+        &self.system_prompt
+    }
+
+    async fn maybe_compact(
+        &self,
+        session: &mut Session,
+        event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let Some(policy) = self.compaction else {
+            return;
+        };
+        let used = estimate_tokens(&self.system_prompt, session.messages())
+            .max(session.last_prompt_tokens());
+        if !policy.should_compact(used) {
+            return;
+        }
+        match compact_session(
+            &self.provider,
+            session,
+            &self.system_prompt,
+            policy.context_window,
+            self.options.max_tokens,
+        )
+        .await
+        {
+            Ok(r) => {
+                let _ = event_tx.send(AgentEvent::Notice(format!(
+                    "Context compacted automatically: ~{} -> ~{} tokens.",
+                    r.before_tokens, r.after_tokens
+                )));
+            }
+            Err(err) => {
+                let _ = event_tx.send(AgentEvent::Notice(format!(
+                    "Automatic context compaction failed: {err}"
+                )));
+            }
         }
     }
 
@@ -92,9 +150,18 @@ impl AgentEngine {
         user_input: String,
         event_tx: mpsc::UnboundedSender<AgentEvent>,
     ) {
+        let label: String = user_input
+            .lines()
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(60)
+            .collect();
+        session.begin_checkpoint(label);
         session.push_user(user_input);
 
         for _iteration in 0..self.options.max_tool_iterations {
+            self.maybe_compact(session, &event_tx).await;
             let request = CompletionRequest {
                 system_prompt: self.system_prompt.clone(),
                 messages: session.messages().to_vec(),
@@ -166,7 +233,10 @@ impl AgentEngine {
                     }
                 };
 
-                if tool.risk_level().requires_approval(self.options.approval_mode) {
+                if tool
+                    .risk_level()
+                    .requires_approval(self.options.approval_mode)
+                {
                     let (resp_tx, resp_rx) = oneshot::channel();
                     let _ = event_tx.send(AgentEvent::ToolApprovalRequested {
                         call_id: call.id.clone(),
@@ -195,6 +265,11 @@ impl AgentEngine {
                     tool_name: call.name.clone(),
                     summary: preview.summary,
                 });
+
+                if tool.risk_level() == ToolRisk::FileWrite {
+                    session
+                        .capture_before_write(&tool.touched_paths(&self.tool_ctx, &call.arguments));
+                }
 
                 let output = match tool.execute(&self.tool_ctx, &call.arguments).await {
                     Ok(out) => out,
@@ -320,6 +395,9 @@ mod tests {
         assert!(saw_turn_complete);
         assert_eq!(session.total_usage().input_tokens, 30);
         assert_eq!(session.total_usage().output_tokens, 13);
-        assert_eq!(session.messages().last().unwrap().content, "The file says: rust rocks");
+        assert_eq!(
+            session.messages().last().unwrap().content,
+            "The file says: rust rocks"
+        );
     }
 }

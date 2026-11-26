@@ -10,11 +10,11 @@ pub struct ReadFileTool;
 
 #[async_trait]
 impl Tool for ReadFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "read_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Read the contents of a file inside the workspace with line numbers. Supports optional 1-based offset and limit."
     }
 
@@ -74,11 +74,11 @@ pub struct WriteFileTool;
 
 #[async_trait]
 impl Tool for WriteFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "write_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Create a new file or overwrite an existing file inside the workspace."
     }
 
@@ -95,6 +95,14 @@ impl Tool for WriteFileTool {
 
     fn risk_level(&self) -> ToolRisk {
         ToolRisk::FileWrite
+    }
+
+    fn touched_paths(&self, ctx: &ToolContext, args: &Value) -> Vec<std::path::PathBuf> {
+        required_str(args, "path")
+            .ok()
+            .and_then(|p| ctx.resolve_path(p).ok())
+            .into_iter()
+            .collect()
     }
 
     fn preview(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPreview, ToolError> {
@@ -155,11 +163,11 @@ pub struct EditFileTool;
 
 #[async_trait]
 impl Tool for EditFileTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "edit_file"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Replace an exact unique string in an existing file. Fails if old_string is not found or matches multiple times unless replace_all is true."
     }
 
@@ -178,6 +186,14 @@ impl Tool for EditFileTool {
 
     fn risk_level(&self) -> ToolRisk {
         ToolRisk::FileWrite
+    }
+
+    fn touched_paths(&self, ctx: &ToolContext, args: &Value) -> Vec<std::path::PathBuf> {
+        required_str(args, "path")
+            .ok()
+            .and_then(|p| ctx.resolve_path(p).ok())
+            .into_iter()
+            .collect()
     }
 
     fn preview(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPreview, ToolError> {
@@ -242,7 +258,9 @@ fn compute_edit(
     replace_all: bool,
 ) -> Result<String, ToolError> {
     if old_str.is_empty() {
-        return Err(ToolError::InvalidArgs("old_string must not be empty".into()));
+        return Err(ToolError::InvalidArgs(
+            "old_string must not be empty".into(),
+        ));
     }
     let count = current.matches(old_str).count();
     if count == 0 {
@@ -267,11 +285,11 @@ pub struct ListDirTool;
 
 #[async_trait]
 impl Tool for ListDirTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "list_dir"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "List files and subdirectories in a workspace directory."
     }
 
@@ -351,7 +369,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(edit_out.diff.unwrap().contains("+    println!(\"hello ecliven\");"));
+        assert!(edit_out
+            .diff
+            .unwrap()
+            .contains("+    println!(\"hello ecliven\");"));
 
         let updated = std::fs::read_to_string(tmp.path().join("src/demo.rs")).unwrap();
         assert!(updated.contains("hello ecliven"));
