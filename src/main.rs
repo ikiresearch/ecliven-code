@@ -133,7 +133,10 @@ async fn main() -> Result<()> {
 }
 
 async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>) -> Result<()> {
-    let provider = build_provider(&config)?;
+    let (provider, note) = ecliven_code::ai::router::select_provider(&config, &prompt)?;
+    if let Some(note) = note {
+        eprintln!("[ecliven] {note}");
+    }
     let conns = mcp::connect_all(&config.mcp_servers).await;
     for err in &conns.errors {
         eprintln!("[mcp] {err}");
@@ -149,7 +152,11 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
             approval_mode: config.approval_mode,
         },
     )
-    .with_compaction(config.context_window_tokens(), config.auto_compact_percent);
+    .with_compaction(
+        config.context_window_tokens(),
+        config.effective_compact_percent(),
+    )
+    .with_saver_mode(config.saver_mode);
 
     let mut session = Session::new();
     if let Some(store) = SessionStore::default_store() {
@@ -158,8 +165,8 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
                 let found = store
                     .find(&query, &config.workspace_dir)
                     .map_err(anyhow::Error::msg)?;
-                let (_, messages) = store::load_session(&found.path).map_err(anyhow::Error::msg)?;
-                session = Session::from_messages(messages);
+                let loaded = store::load_session(&found.path).map_err(anyhow::Error::msg)?;
+                session = Session::from_loaded(loaded);
                 session.attach_recorder(store.reopen(&found));
                 eprintln!("[ecliven] Resumed session {}", found.meta.id);
             }
@@ -179,6 +186,7 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
 
     let handle = tokio::spawn(async move {
         engine.run_turn(&mut session, prompt, tx).await;
+        session
     });
 
     while let Some(event) = rx.recv().await {
@@ -217,7 +225,10 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
         }
     }
 
-    let _ = handle.await;
+    let session = handle.await.ok();
+    if let Some(err) = session.and_then(|mut s| s.take_persist_error()) {
+        eprintln!("[ecliven] Warning: session could not be saved: {err}");
+    }
     if let Some(id) = session_id {
         eprintln!("[ecliven] Session {id} saved. Continue with: ecliven resume {id}");
     }
@@ -231,20 +242,30 @@ async fn run_headless_swarm(
     prompt: String,
 ) -> Result<()> {
     let provider = build_provider(&config)?;
+    let mixed = ecliven_code::ai::router::swarm_providers(&config);
+    for err in &mixed.errors {
+        eprintln!("[swarm] model skipped: {err}");
+    }
+    let saver = config.saver_mode;
     let engine = SwarmEngine::new(
         domain,
         provider,
         Arc::new(ToolRegistry::default_registry()),
         config.tool_context(),
         SwarmOptions {
-            max_tokens: config.max_tokens,
+            max_tokens: if saver {
+                config.max_tokens.min(2048)
+            } else {
+                config.max_tokens
+            },
             temperature: config.temperature,
-            worker_max_iterations: 8,
+            worker_max_iterations: if saver { 4 } else { 8 },
             lead_max_iterations: config.max_tool_iterations,
             approval_mode: config.approval_mode,
             target_scope,
         },
-    );
+    )
+    .with_providers(mixed.workers, mixed.lead);
 
     let mut session = Session::new();
     let (tx, mut rx) = mpsc::unbounded_channel::<SwarmEvent>();

@@ -217,6 +217,18 @@ pub struct AppConfig {
     /// Override of the provider's default context window in tokens.
     pub context_window: Option<u32>,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub router: crate::ai::router::RouterConfig,
+    /// Minimize tokens and cost: cheaper models, shorter outputs, earlier compaction.
+    pub saver_mode: bool,
+    /// `provider/model` refs for Swarm workers (round-robin); empty = active model.
+    pub swarm_worker_models: Vec<String>,
+    pub swarm_lead_model: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FileSwarmConfig {
+    workers: Option<Vec<String>>,
+    lead: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -245,6 +257,9 @@ fn default_true() -> bool {
 
 #[derive(Debug, Default, Deserialize)]
 struct FileConfig {
+    router: Option<crate::ai::router::RouterConfig>,
+    saver_mode: Option<bool>,
+    swarm: Option<FileSwarmConfig>,
     sandbox_mode: Option<SandboxMode>,
     sandbox_network: Option<bool>,
     sandbox_writable_roots: Option<Vec<PathBuf>>,
@@ -289,6 +304,7 @@ pub struct CliOverrides {
     pub model: Option<String>,
     pub approval_mode: Option<ApprovalMode>,
     pub sandbox_mode: Option<SandboxMode>,
+    pub saver_mode: bool,
 }
 
 impl AppConfig {
@@ -320,6 +336,19 @@ impl AppConfig {
             auto_compact_percent: DEFAULT_AUTO_COMPACT_PERCENT,
             context_window: None,
             mcp_servers: Vec::new(),
+            router: crate::ai::router::RouterConfig::default(),
+            saver_mode: false,
+            swarm_worker_models: Vec::new(),
+            swarm_lead_model: None,
+        }
+    }
+
+    /// Auto-compaction threshold, lowered in saver mode.
+    pub fn effective_compact_percent(&self) -> u8 {
+        if self.saver_mode && self.auto_compact_percent > 0 {
+            self.auto_compact_percent.min(60)
+        } else {
+            self.auto_compact_percent
         }
     }
 
@@ -456,6 +485,20 @@ impl AppConfig {
         if let Some(window) = parsed.context_window {
             self.context_window = Some(window);
         }
+        if let Some(router) = parsed.router {
+            self.router = router;
+        }
+        if let Some(saver) = parsed.saver_mode {
+            self.saver_mode = saver;
+        }
+        if let Some(swarm) = parsed.swarm {
+            if let Some(workers) = swarm.workers {
+                self.swarm_worker_models = workers;
+            }
+            if swarm.lead.is_some() {
+                self.swarm_lead_model = swarm.lead;
+            }
+        }
         if let Some(servers) = parsed.mcp_servers {
             for (name, mut server) in servers {
                 server.name = name;
@@ -583,6 +626,9 @@ impl AppConfig {
         if let Some(mode) = overrides.sandbox_mode {
             self.sandbox_mode = mode;
         }
+        if overrides.saver_mode {
+            self.saver_mode = true;
+        }
     }
 }
 
@@ -656,6 +702,7 @@ model = "llama3.2"
             model: Some("deepseek-coder:6.7b".into()),
             approval_mode: Some(ApprovalMode::AutoEdit),
             sandbox_mode: None,
+            saver_mode: false,
         };
 
         let cfg = AppConfig::load_from_sources(
@@ -683,6 +730,19 @@ sandbox_mode = "read-only"
 sandbox_network = false
 auto_compact_percent = 70
 
+saver_mode = true
+
+[swarm]
+workers = ["anthropic/test-a", "openai/test-b", "openrouter/test/c"]
+lead = "anthropic/test-lead"
+
+[router]
+enabled = true
+cheap = "ollama/test-small"
+
+[router.specialties]
+security = "openrouter/test/sec"
+
 [mcp_servers.docs]
 command = "npx"
 args = ["-y", "example-mcp"]
@@ -706,6 +766,12 @@ trusted = true
         assert_eq!(cfg.sandbox_mode, SandboxMode::ReadOnly);
         assert!(!cfg.sandbox_network);
         assert_eq!(cfg.auto_compact_percent, 70);
+        assert_eq!(cfg.effective_compact_percent(), 60);
+        assert!(cfg.saver_mode && cfg.router.enabled);
+        assert_eq!(cfg.router.cheap.as_deref(), Some("ollama/test-small"));
+        assert_eq!(cfg.router.specialties["security"], "openrouter/test/sec");
+        assert_eq!(cfg.swarm_worker_models.len(), 3);
+        assert_eq!(cfg.swarm_lead_model.as_deref(), Some("anthropic/test-lead"));
         assert_eq!(cfg.mcp_servers.len(), 2);
         let docs = cfg.mcp_servers.iter().find(|s| s.name == "docs").unwrap();
         assert_eq!(docs.command.as_deref(), Some("npx"));

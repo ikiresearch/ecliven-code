@@ -50,6 +50,12 @@ pub struct AgentOptions {
     pub approval_mode: ApprovalMode,
 }
 
+const SAVER_MAX_TOKENS: u32 = 2048;
+const SAVER_TOOL_OUTPUT_CHARS: usize = 4_000;
+const SAVER_DIRECTIVE: &str = "\n\nSAVER MODE: minimize tokens and cost. Answer tersely without preamble or recap. \
+Read only the files and line ranges you need (prefer grep_content over reading whole files), never re-read a file you already have, \
+batch edits with apply_patch, and stop as soon as the task is done.";
+
 pub struct AgentEngine {
     provider: Arc<dyn LlmProvider>,
     tools: Arc<ToolRegistry>,
@@ -57,6 +63,7 @@ pub struct AgentEngine {
     options: AgentOptions,
     system_prompt: String,
     compaction: Option<CompactionPolicy>,
+    saver: bool,
 }
 
 impl AgentEngine {
@@ -84,7 +91,18 @@ impl AgentEngine {
             options,
             system_prompt,
             compaction: None,
+            saver: false,
         }
+    }
+
+    /// Saver mode: shorter answers, capped tool output kept in history.
+    pub fn with_saver_mode(mut self, enabled: bool) -> Self {
+        if enabled {
+            self.saver = true;
+            self.options.max_tokens = self.options.max_tokens.min(SAVER_MAX_TOKENS);
+            self.system_prompt.push_str(SAVER_DIRECTIVE);
+        }
+        self
     }
 
     /// Enables automatic compaction when the estimated context reaches `threshold_percent`.
@@ -276,7 +294,15 @@ impl AgentEngine {
                     Err(err) => ToolOutput::err(format!("Tool error: {err}")),
                 };
 
-                session.push_tool_result(&call.id, &call.name, output.content.clone());
+                let kept = if self.saver && output.content.len() > SAVER_TOOL_OUTPUT_CHARS {
+                    format!(
+                        "{}\n... [truncated in saver mode]",
+                        crate::tools::truncate_str(&output.content, SAVER_TOOL_OUTPUT_CHARS)
+                    )
+                } else {
+                    output.content.clone()
+                };
+                session.push_tool_result(&call.id, &call.name, kept);
                 let _ = event_tx.send(AgentEvent::ToolCompleted {
                     tool_name: call.name,
                     output,

@@ -83,7 +83,8 @@ impl Tool for RunCommandTool {
         }
 
         if combined.len() > MAX_OUTPUT_CHARS {
-            combined.truncate(MAX_OUTPUT_CHARS);
+            let keep = crate::tools::truncate_str(&combined, MAX_OUTPUT_CHARS).len();
+            combined.truncate(keep);
             combined.push_str("\n... [output truncated]");
         }
 

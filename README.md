@@ -128,6 +128,7 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/undo` (alias `/revert`) | `/checkpoints`
 - `/sessions` | `/resume [id|last]`
 - `/mcp`
+- `/router [on|off]` | `/saver [on|off]` | `/swarm-models`
 - `/status`
 - `/clear`
 - `/help`
@@ -149,6 +150,14 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 
 Se cambia con `--sandbox <modo>`, `/sandbox <modo>` o en `.ecliven.toml`.
 
+## Swarm con varios laboratorios, model router y modo ahorro
+
+Los modelos se indican como `proveedor/modelo` (por ejemplo `anthropic/test-model`, `openrouter/vendor/test-model`) y usan las API keys ya configuradas.
+
+- **Swarm multi-modelo:** `[swarm].workers` asigna un modelo a cada especialista por turnos, y `lead` el modelo que sintetiza. Cada agente muestra su modelo en la Swarm Hub. Sin configuracion se usa el modelo activo.
+- **Model router:** con `[router].enabled = true`, cada turno se clasifica sin llamar a ningun modelo (dificultad `simple`/`standard`/`complex` y especialidad: security, frontend, backend, data, tests, docs, devops). Se usa el modelo de la especialidad si existe; si no, `cheap`, `standard` o `strong` segun la dificultad. El chat muestra que modelo eligio y por que.
+- **Modo ahorro** (`--saver`, `/saver on` o `saver_mode = true`): baja un nivel de modelo (o usa `cheap` si el router esta apagado), limita la respuesta a 2048 tokens, recorta a 4000 caracteres la salida de herramientas que queda en el historial, compacta al 60 % y pide al modelo respuestas cortas y lecturas minimas. En Swarm, los especialistas hacen como maximo 4 iteraciones y usan `cheap` si no hay `[swarm].workers`.
+
 ## Configuracion nueva en `.ecliven.toml`
 
 ```toml
@@ -157,6 +166,21 @@ sandbox_network = true
 sandbox_writable_roots = ["/home/me/.cargo"]
 auto_compact_percent = 80          # 0 desactiva la compactacion automatica
 # context_window = 128000          # sobrescribe la ventana del proveedor
+saver_mode = false
+
+[swarm]
+workers = ["anthropic/test-model-a", "openai/test-model-b", "openrouter/vendor/test-model-c"]
+lead = "anthropic/test-model-lead"
+
+[router]
+enabled = true
+cheap = "ollama/test-small"
+standard = "openai/test-medium"
+strong = "anthropic/test-large"
+
+[router.specialties]
+security = "anthropic/test-large"
+frontend = "openrouter/vendor/test-frontend"
 
 [mcp_servers.docs]
 command = "npx"

@@ -104,6 +104,8 @@ pub struct SectionState {
     pub roster: Vec<SwarmWorkerView>,
     pub lead_status: SwarmAgentStatus,
     pub target_scope: Option<String>,
+    /// Prompt tokens reported by the latest response in this tab.
+    pub context_tokens: u32,
 }
 
 impl SectionState {
@@ -117,6 +119,7 @@ impl SectionState {
             roster: Vec::new(),
             lead_status: SwarmAgentStatus::Idle,
             target_scope: None,
+            context_tokens: 0,
         }
     }
 
@@ -131,6 +134,7 @@ impl SectionState {
             roster,
             lead_status: SwarmAgentStatus::Idle,
             target_scope,
+            context_tokens: 0,
         }
     }
 
@@ -388,10 +392,11 @@ impl App {
             Ok(f) => f,
             Err(err) => return self.push_error(err),
         };
-        let messages = match store::load_session(&found.path) {
-            Ok((_, m)) => m,
+        let loaded = match store::load_session(&found.path) {
+            Ok(l) => l,
             Err(err) => return self.push_error(err),
         };
+        let messages = loaded.messages.clone();
         let mut entries = Vec::new();
         for m in &messages {
             match m.role {
@@ -403,7 +408,7 @@ impl App {
             }
         }
         let count = messages.len();
-        let mut session = Session::from_messages(messages);
+        let mut session = Session::from_loaded(loaded);
         session.attach_recorder(store.reopen(&found));
         let st = self.active_state_mut();
         *st.session.lock().await = session;
@@ -453,12 +458,26 @@ impl App {
             return self.push_system("Nothing to undo: no file changes recorded in this tab.");
         };
         match cp.restore() {
-            Ok(paths) => {
-                let root = &self.config.workspace_dir;
-                let names: Vec<String> = paths
+            Ok(report) => {
+                let root = self.config.workspace_dir.clone();
+                let names: Vec<String> = report
+                    .restored
                     .iter()
-                    .map(|p| p.strip_prefix(root).unwrap_or(p).display().to_string())
+                    .map(|p| p.strip_prefix(&root).unwrap_or(p).display().to_string())
                     .collect();
+                if !report.skipped.is_empty() {
+                    let skipped: Vec<String> = report
+                        .skipped
+                        .iter()
+                        .map(|(p, why)| {
+                            format!("{} ({why})", p.strip_prefix(&root).unwrap_or(p).display())
+                        })
+                        .collect();
+                    self.push_error(format!(
+                        "Could not restore (no snapshot, left untouched): {}",
+                        skipped.join(", ")
+                    ));
+                }
                 self.pending_notes.push(format!(
                     "The user undid your file changes from the turn \"{}\"; these files were restored: {}.",
                     cp.label,
@@ -585,25 +604,15 @@ impl App {
 
     pub fn context_usage(&self) -> (u32, u32, u8) {
         let max_ctx = self.config.context_window_tokens().max(1);
-        let estimated_chars: usize =
-            self.active_state()
-                .entries
-                .iter()
-                .map(|e| match e {
-                    ChatEntry::User(s)
-                    | ChatEntry::Assistant(s)
-                    | ChatEntry::System(s)
-                    | ChatEntry::Error(s) => s.len(),
-                    ChatEntry::SwarmReport { content, .. }
-                    | ChatEntry::SwarmLead { content, .. } => content.len(),
-                    ChatEntry::ToolCall { summary, .. } => summary.len(),
-                    ChatEntry::ToolResult { output, diff, .. } => {
-                        output.len() + diff.as_ref().map(|d| d.len()).unwrap_or(0)
-                    }
-                })
-                .sum();
-        let estimated_tokens = (estimated_chars / 4) as u32;
-        let used = self.total_input_tokens.max(estimated_tokens);
+        let st = self.active_state();
+        // Current conversation size, not the cumulative token counter, so the
+        // bar drops after compaction. While a turn holds the lock, use the
+        // prompt size reported by the last response.
+        let used = match st.session.try_lock() {
+            Ok(session) => crate::agent::compact::estimate_tokens("", session.messages())
+                .max(session.last_prompt_tokens()),
+            Err(_) => st.context_tokens,
+        };
         let pct = ((used as u64 * 100) / max_ctx as u64).min(100) as u8;
         (used, max_ctx, pct)
     }
@@ -1169,8 +1178,21 @@ impl App {
             .entries
             .push(ChatEntry::User(prompt.clone()));
 
-        let provider = match build_provider(&self.config) {
-            Ok(p) => p,
+        let is_swarm = self.active_swarm_domain().is_some();
+        let selected = if is_swarm {
+            build_provider(&self.config).map(|p| (p, None))
+        } else {
+            crate::ai::router::select_provider(&self.config, &prompt)
+        };
+        let provider = match selected {
+            Ok((p, note)) => {
+                if let Some(note) = note {
+                    self.section_state_mut(section)
+                        .entries
+                        .push(ChatEntry::System(note));
+                }
+                p
+            }
             Err(err) => {
                 self.section_state_mut(section)
                     .entries
@@ -1206,20 +1228,32 @@ impl App {
         if let Some(domain) = self.active_swarm_domain() {
             self.section_state_mut(section).reset_roster_idle();
 
+            let mixed = crate::ai::router::swarm_providers(&self.config);
+            for err in &mixed.errors {
+                self.section_state_mut(section)
+                    .entries
+                    .push(ChatEntry::Error(format!("Swarm model skipped: {err}")));
+            }
+            let saver = self.config.saver_mode;
             let engine = SwarmEngine::new(
                 domain,
                 provider,
                 Arc::clone(&self.tools),
                 tool_ctx,
                 SwarmOptions {
-                    max_tokens: self.config.max_tokens,
+                    max_tokens: if saver {
+                        self.config.max_tokens.min(2048)
+                    } else {
+                        self.config.max_tokens
+                    },
                     temperature: self.config.temperature,
-                    worker_max_iterations: 8,
+                    worker_max_iterations: if saver { 4 } else { 8 },
                     lead_max_iterations: self.config.max_tool_iterations,
                     approval_mode: self.config.approval_mode,
                     target_scope,
                 },
-            );
+            )
+            .with_providers(mixed.workers, mixed.lead);
 
             tokio::spawn(async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<SwarmEvent>();
@@ -1250,8 +1284,9 @@ impl App {
             )
             .with_compaction(
                 self.config.context_window_tokens(),
-                self.config.auto_compact_percent,
-            );
+                self.config.effective_compact_percent(),
+            )
+            .with_saver_mode(self.config.saver_mode);
 
             tokio::spawn(async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -1352,6 +1387,9 @@ impl App {
             }
             AgentEvent::AssistantFinished { content, usage } => {
                 let st = self.section_state_mut(section);
+                if let Some(u) = &usage {
+                    st.context_tokens = u.input_tokens;
+                }
                 st.streaming_buffer.clear();
                 if !content.trim().is_empty() {
                     st.entries.push(ChatEntry::Assistant(content));
@@ -1419,6 +1457,16 @@ impl App {
                 let st = self.section_state_mut(section);
                 st.streaming_buffer.clear();
                 st.auto_scroll = true;
+                let persist_error = st
+                    .session
+                    .try_lock()
+                    .ok()
+                    .and_then(|mut s| s.take_persist_error());
+                if let Some(err) = persist_error {
+                    st.entries.push(ChatEntry::Error(format!(
+                        "Session could not be saved: {err}"
+                    )));
+                }
             }
         }
     }
@@ -1598,6 +1646,9 @@ impl App {
                      /sessions                                       List saved sessions for this workspace\n\
                      /resume [id|last]                               Resume a saved session in this tab\n\
                      /mcp                                            Show MCP servers and their tools\n\
+                     /router [on|off]                                Auto-pick model by difficulty, cost, specialty\n\
+                     /saver [on|off]                                 Saver mode: minimize tokens and cost\n\
+                     /swarm-models                                   Show models used by Swarm agents\n\
                      /status                                         Show session & provider status\n\
                      /clear                                          Clear current tab history\n\
                      /quit                                           Exit Ecliven Code\n\n\
@@ -1914,6 +1965,67 @@ impl App {
                     ),
                 },
             },
+            "/router" => {
+                match arg1 {
+                    Some("on") => self.config.router.enabled = true,
+                    Some("off") => self.config.router.enabled = false,
+                    Some(_) => return self.push_error("Usage: /router [on|off]"),
+                    None => {}
+                }
+                let r = &self.config.router;
+                let show = |v: &Option<String>| v.clone().unwrap_or_else(|| "-".into());
+                let mut msg = format!(
+                    "Router: {}\n  cheap: {}\n  standard: {}\n  strong: {}",
+                    if r.enabled { "on" } else { "off" },
+                    show(&r.cheap),
+                    show(&r.standard),
+                    show(&r.strong)
+                );
+                for (name, model) in &r.specialties {
+                    msg.push_str(&format!("\n  {name}: {model}"));
+                }
+                if r.cheap.is_none() && r.standard.is_none() && r.strong.is_none() {
+                    msg.push_str("\nConfigure [router] in .ecliven.toml with provider/model refs.");
+                }
+                self.push_system(msg);
+            }
+            "/saver" => {
+                match arg1 {
+                    Some("on") => self.config.saver_mode = true,
+                    Some("off") => self.config.saver_mode = false,
+                    Some(_) => return self.push_error("Usage: /saver [on|off]"),
+                    None => {}
+                }
+                let msg = if self.config.saver_mode {
+                    format!(
+                        "Saver mode on: one model tier cheaper{}, max {} output tokens, tool output capped, compaction at {}%.",
+                        self.config
+                            .router
+                            .cheap
+                            .as_ref()
+                            .map(|m| format!(" (cheap model {m})"))
+                            .unwrap_or_default(),
+                        self.config.max_tokens.min(2048),
+                        self.config.effective_compact_percent()
+                    )
+                } else {
+                    "Saver mode off.".to_string()
+                };
+                self.push_system(msg);
+            }
+            "/swarm-models" => {
+                let workers = if self.config.swarm_worker_models.is_empty() {
+                    "active model".to_string()
+                } else {
+                    self.config.swarm_worker_models.join(", ")
+                };
+                let lead = self
+                    .config
+                    .swarm_lead_model
+                    .clone()
+                    .unwrap_or_else(|| "active model".into());
+                self.push_system(format!("Swarm workers: {workers}\nSwarm lead: {lead}"));
+            }
             "/quit" | "/exit" => {
                 self.should_quit = true;
             }
