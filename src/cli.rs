@@ -17,6 +17,8 @@ pub enum Commands {
         #[arg(long = "version")]
         version: Option<String>,
     },
+    /// List available models automatically discovered for the active provider or CLI
+    Models,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -49,6 +51,12 @@ pub enum CliProvider {
     Openai,
     Openrouter,
     Ollama,
+    Codex,
+    Agy,
+    Claude,
+    Opencode,
+    Gemini,
+    Cli,
 }
 
 impl From<CliProvider> for ProviderKind {
@@ -58,6 +66,12 @@ impl From<CliProvider> for ProviderKind {
             CliProvider::Openai => ProviderKind::OpenAi,
             CliProvider::Openrouter => ProviderKind::OpenRouter,
             CliProvider::Ollama => ProviderKind::Ollama,
+            CliProvider::Codex => ProviderKind::CodexCli,
+            CliProvider::Agy => ProviderKind::AgyCli,
+            CliProvider::Claude => ProviderKind::ClaudeCli,
+            CliProvider::Opencode => ProviderKind::OpenCodeCli,
+            CliProvider::Gemini => ProviderKind::GeminiCli,
+            CliProvider::Cli => ProviderKind::CustomCli,
         }
     }
 }
@@ -93,7 +107,7 @@ pub struct Cli {
     #[arg(short = 'd', long = "dir")]
     pub dir: Option<PathBuf>,
 
-    /// AI provider to use (anthropic, openai, openrouter, ollama)
+    /// AI provider or connected CLI (anthropic, openai, openrouter, ollama, codex, agy, claude, opencode, gemini, cli)
     #[arg(short = 'p', long = "provider", value_enum)]
     pub provider: Option<CliProvider>,
 
@@ -112,6 +126,10 @@ pub struct Cli {
     /// Optional relative folder or file path inside the workspace to focus Swarm analysis on
     #[arg(long = "scope")]
     pub scope: Option<String>,
+
+    /// Open the interactive setup wizard (Terms, Telemetry, Folder picker)
+    #[arg(long = "setup")]
+    pub setup: bool,
 
     /// Run a single non-interactive prompt and print the response to stdout
     #[arg(short = 'r', long = "prompt")]

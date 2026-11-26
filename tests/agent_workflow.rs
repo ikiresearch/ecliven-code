@@ -10,11 +10,13 @@ use ecliven_code::agent::{AgentEngine, AgentEvent, AgentOptions};
 use ecliven_code::ai::{
     AiError, CompletionRequest, CompletionResponse, LlmProvider, TokenUsage, ToolCall,
 };
+use ecliven_code::config::preferences::UserPreferences;
 use ecliven_code::config::{AppConfig, ApprovalMode, ProviderKind};
 use ecliven_code::swarm::domain::{SecuritySubMode, SwarmDomain};
 use ecliven_code::swarm::{SwarmEngine, SwarmEvent, SwarmOptions};
 use ecliven_code::tools::{ToolContext, ToolRegistry};
 use ecliven_code::tui::app::{App, ChatEntry, WorkspaceSection};
+use ecliven_code::tui::onboarding::OnboardingStep;
 
 struct ScriptedProvider {
     turns: Mutex<Vec<CompletionResponse>>,
@@ -276,8 +278,29 @@ async fn tui_swarm_sections_and_security_submodes_stay_isolated() {
 
     app.input = "/swarm off".into();
     app.cursor_pos = app.input.len();
-    app.submit_input(tx).await;
+    app.submit_input(tx.clone()).await;
     assert_eq!(app.active_section, WorkspaceSection::Chat);
+
+    app.input = "/connect codex".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert_eq!(app.config.active_provider, ProviderKind::CodexCli);
+
+    app.input = "/connect agy".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert_eq!(app.config.active_provider, ProviderKind::AgyCli);
+
+    app.input = "/connect custom my-ai --plain".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx).await;
+    assert_eq!(app.config.active_provider, ProviderKind::CustomCli);
+    assert_eq!(app.config.active_settings().base_url, "my-ai --plain");
+
+    let (used, max_ctx, pct) = app.context_usage();
+    assert!(max_ctx >= 32_000);
+    assert!(pct <= 100);
+    assert!(used < max_ctx);
 }
 
 struct DomainMockProvider;
@@ -363,4 +386,78 @@ async fn code_swarm_runs_three_coders_on_same_task_and_chief_combines_best_code(
     badges.sort();
     assert_eq!(badges, vec!["CLEAN", "PERF", "ROBUST"]);
     assert!(chief_done);
+}
+
+#[tokio::test]
+async fn onboarding_requires_terms_telemetry_choice_and_workspace_folder() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = tmp.path().join("my-project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    let prefs_file = tmp.path().join("prefs.toml");
+
+    let cfg = AppConfig::default_for_workspace(tmp.path().to_path_buf());
+    let mut app = App::with_preferences(
+        cfg,
+        None,
+        None,
+        UserPreferences::default(),
+        Some(prefs_file.clone()),
+        false,
+    );
+
+    // Step 1: Terms
+    assert_eq!(
+        app.onboarding.as_ref().unwrap().step,
+        OnboardingStep::Terms
+    );
+    app.onboarding_confirm();
+    assert!(app.prefs.terms_accepted);
+
+    // Step 2: Telemetry
+    assert_eq!(
+        app.onboarding.as_ref().unwrap().step,
+        OnboardingStep::Telemetry
+    );
+    app.onboarding_set_telemetry(true);
+    app.onboarding_confirm();
+    assert!(app.prefs.telemetry_enabled);
+
+    // Step 3: Choose folder ('my-project')
+    assert_eq!(
+        app.onboarding.as_ref().unwrap().step,
+        OnboardingStep::Workspace
+    );
+    app.onboarding_down(); // index 1 = ..
+    app.onboarding_down(); // index 2 = my-project
+    app.onboarding_open_subdir();
+    app.onboarding_confirm(); // index 0 = confirm my-project
+
+    assert!(app.onboarding.is_none());
+    assert!(app.config.workspace_dir.ends_with("my-project"));
+
+    // Preferences persisted to disk
+    let reloaded = UserPreferences::load_from(&prefs_file);
+    assert!(reloaded.terms_accepted);
+    assert!(reloaded.telemetry_enabled);
+    assert!(!reloaded.needs_onboarding());
+
+    // Slash command toggles telemetry later
+    let (tx, _rx) = mpsc::unbounded_channel();
+    app.input = "/telemetry off".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx.clone()).await;
+    assert!(!app.prefs.telemetry_enabled);
+
+    // Model picker opens via /models, filters, and selects a model
+    app.input = "/models".into();
+    app.cursor_pos = app.input.len();
+    app.submit_input(tx).await;
+    assert!(app.model_picker.is_some());
+    app.model_picker_char('o');
+    app.model_picker_char('p');
+    app.model_picker_char('u');
+    app.model_picker_char('s');
+    app.model_picker_select();
+    assert!(app.model_picker.is_none());
+    assert!(app.config.active_settings().model.contains("opus"));
 }

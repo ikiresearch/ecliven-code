@@ -5,9 +5,8 @@ Agente de codigo con IA en terminal construido en Rust.
 ## Caracteristicas base
 
 - **Multi-proveedor unificado (`LlmProvider`)**:
-  - Anthropic (Claude Messages API con streaming SSE y `tool_use`)
-  - OpenAI y compatibles (OpenAI, OpenRouter, DeepSeek, Groq)
-  - Ollama local (`/api/chat` con soporte de herramientas)
+  - APIs: Anthropic (Claude), OpenAI y compatibles (OpenRouter, DeepSeek, Groq), Ollama local
+  - **CLIs externos conectados (`/connect`)**: `codex`, `agy`, `claude`, `opencode`, `gemini` y cualquier CLI personalizado (`/connect custom <cmd>`) sin necesitar API keys adicionales
 - **Herramientas de codigo con sandbox al workspace**:
   - `read_file`, `write_file`, `edit_file` (con preview de diff unificado antes de escribir)
   - `list_dir`, `search_files` (glob), `grep_content` (regex)
@@ -100,14 +99,22 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 | `Up` / `Down` | Navegar historial de prompts |
 | `F2` | Cambiar de pestana (`Chat` -> `Swarm: Code` -> `Swarm: Security`) |
 | `F3` | Abrir Swarm Hub (selector separado de Codigo y Ciberseguridad) |
+| `F4` | Alternar sub-modo de Seguridad (`Defensa` <-> `Threat Model`) |
+| `F5` | Instalar actualizacion disponible inmediatamente |
+| `F6` | Abrir selector de carpeta de trabajo |
+| `Ctrl+P` / `F7` | Abrir selector interactivo de modelos con buscador |
 | `F1` | Mostrar/ocultar ayuda |
 | `Ctrl+Q` | Salir |
 
 ## Comandos slash en el chat
 
-- `/swarm` (abre el Swarm Hub)
-- `/swarm code` / `/swarm security` / `/swarm off`
-- `/provider <anthropic|openai|openrouter|ollama>`
+- `/connect` | `/connect codex|agy|claude|opencode|gemini|custom <cmd>`
+- `/models` / `/model` (abre el selector automatico de modelos)
+- `/swarm` | `/swarm code [carpeta]` | `/swarm security defense|threat [carpeta]` | `/swarm off`
+- `/scope <carpeta|off>`
+- `/setup` | `/folder` | `/telemetry <on|off>`
+- `/update [check]`
+- `/provider <nombre>`
 - `/model <nombre-del-modelo>`
 - `/approval <ask|auto-edit|auto-all>`
 - `/status`

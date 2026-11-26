@@ -1,15 +1,22 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::agent::session::Session;
 use crate::agent::{AgentEngine, AgentEvent, AgentOptions};
+use crate::ai::cli_backend::{detect_installed_clis, DetectedCli};
+use crate::ai::models::{curated_fallback_models, fetch_models_for_config, ModelOption};
 use crate::ai::registry::build_provider;
+use crate::config::preferences::UserPreferences;
 use crate::config::{AppConfig, ApprovalMode, ProviderKind};
 use crate::swarm::domain::{SecuritySubMode, SwarmDomain};
 use crate::swarm::{SwarmAgentStatus, SwarmEngine, SwarmEvent, SwarmOptions};
 use crate::tools::{ToolContext, ToolOutput, ToolPreview, ToolRegistry};
 use crate::tui::keybindings::ModalState;
+use crate::tui::onboarding::{OnboardingState, OnboardingStep};
 use crate::updater::{self, ReleaseInfo, UpdateStatus};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -94,10 +101,10 @@ pub struct SectionState {
 }
 
 impl SectionState {
-    fn new_chat(welcome: String) -> Self {
+    fn new_chat() -> Self {
         Self {
             session: Arc::new(Mutex::new(Session::new())),
-            entries: vec![ChatEntry::System(welcome)],
+            entries: Vec::new(),
             streaming_buffer: String::new(),
             scroll_offset: 0,
             auto_scroll: true,
@@ -109,23 +116,9 @@ impl SectionState {
 
     fn new_swarm(domain: SwarmDomain, target_scope: Option<String>) -> Self {
         let roster = build_roster(domain);
-        let specialist_names: Vec<&str> = domain.specialists().iter().map(|r| r.name).collect();
-        let scope_note = target_scope
-            .as_deref()
-            .map(|s| format!("\nActive scope: `{s}` (change with /scope <folder> or /scope off)."))
-            .unwrap_or_else(|| "\nScope: full workspace (focus a folder with /scope <folder>).".into());
-
-        let intro = format!(
-            "{} — {}\nParallel team: {} -> {}.{scope_note}\nPress F2 to switch tabs, F3 for Swarm Hub, or F4 to toggle Security sub-modes.",
-            domain.display_name(),
-            domain.subtitle(),
-            specialist_names.join(" + "),
-            domain.lead_badge()
-        );
-
         Self {
             session: Arc::new(Mutex::new(Session::new())),
-            entries: vec![ChatEntry::System(intro)],
+            entries: Vec::new(),
             streaming_buffer: String::new(),
             scroll_offset: 0,
             auto_scroll: true,
@@ -133,6 +126,10 @@ impl SectionState {
             lead_status: SwarmAgentStatus::Idle,
             target_scope,
         }
+    }
+
+    pub fn is_landing(&self) -> bool {
+        self.entries.is_empty() && self.streaming_buffer.is_empty()
     }
 
     pub fn set_roster_for_domain(&mut self, domain: SwarmDomain) {
@@ -175,6 +172,35 @@ pub enum UiEvent {
     UpdateAvailable(ReleaseInfo),
     UpdateCheckMessage(String),
     UpdateFinished(Result<String, String>),
+    ModelsLoaded {
+        provider: ProviderKind,
+        models: Vec<ModelOption>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelPickerState {
+    pub provider: ProviderKind,
+    pub models: Vec<ModelOption>,
+    pub filter: String,
+    pub selected: usize,
+    pub loading: bool,
+}
+
+impl ModelPickerState {
+    pub fn filtered_models(&self) -> Vec<&ModelOption> {
+        let needle = self.filter.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return self.models.iter().collect();
+        }
+        self.models
+            .iter()
+            .filter(|m| {
+                m.id.to_ascii_lowercase().contains(&needle)
+                    || m.label.to_ascii_lowercase().contains(&needle)
+            })
+            .collect()
+    }
 }
 
 pub struct PendingApproval {
@@ -185,6 +211,9 @@ pub struct PendingApproval {
 
 pub struct App {
     pub config: AppConfig,
+    pub prefs: UserPreferences,
+    prefs_path: Option<PathBuf>,
+    pub onboarding: Option<OnboardingState>,
     pub active_section: WorkspaceSection,
     pub security_sub_mode: SecuritySubMode,
     pub chat_state: SectionState,
@@ -199,9 +228,13 @@ pub struct App {
     pub show_swarm_hub: bool,
     pub should_quit: bool,
     pub tick_count: usize,
+    pub started_at: Instant,
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
     pub available_update: Option<ReleaseInfo>,
+    pub detected_clis: Vec<DetectedCli>,
+    pub model_cache: HashMap<ProviderKind, Vec<ModelOption>>,
+    pub model_picker: Option<ModelPickerState>,
     pub pending_approval: Option<PendingApproval>,
     tools: Arc<ToolRegistry>,
 }
@@ -212,31 +245,19 @@ impl App {
         initial_swarm: Option<SwarmDomain>,
         initial_scope: Option<String>,
     ) -> Self {
-        let provider_status = if config.active_provider.requires_api_key()
-            && config.active_settings().api_key.is_none()
-        {
-            format!(
-                "No API key detected for '{}'. Set {} or switch with /provider ollama.",
-                config.active_provider,
-                config
-                    .active_provider
-                    .env_key_name()
-                    .unwrap_or("API_KEY")
-            )
-        } else {
-            format!(
-                "Ready with {}/{} in {}",
-                config.active_provider,
-                config.active_settings().model,
-                config.workspace_dir.display()
-            )
-        };
+        let mut prefs = UserPreferences::default();
+        prefs.accept_terms();
+        Self::with_preferences(config, initial_swarm, initial_scope, prefs, None, false)
+    }
 
-        let welcome = format!(
-            "Welcome to Ecliven Code v{}. {provider_status}\nPress F2 to switch tabs (Chat | Swarm: Code | Swarm: Security), F3 for Swarm Hub, or type /help.",
-            env!("CARGO_PKG_VERSION")
-        );
-
+    pub fn with_preferences(
+        config: AppConfig,
+        initial_swarm: Option<SwarmDomain>,
+        initial_scope: Option<String>,
+        prefs: UserPreferences,
+        prefs_path: Option<PathBuf>,
+        force_setup: bool,
+    ) -> Self {
         let security_sub_mode = initial_swarm
             .and_then(|d| d.security_sub_mode())
             .unwrap_or(SecuritySubMode::Defense);
@@ -257,11 +278,30 @@ impl App {
             None
         };
 
+        let onboarding = if force_setup {
+            Some(OnboardingState::new_full(
+                config.workspace_dir.clone(),
+                prefs.telemetry_enabled,
+                !prefs.needs_onboarding(),
+            ))
+        } else if prefs.needs_onboarding() {
+            Some(OnboardingState::new_full(
+                config.workspace_dir.clone(),
+                prefs.telemetry_enabled,
+                false,
+            ))
+        } else {
+            None
+        };
+
         Self {
             config,
+            prefs,
+            prefs_path,
+            onboarding,
             active_section,
             security_sub_mode,
-            chat_state: SectionState::new_chat(welcome),
+            chat_state: SectionState::new_chat(),
             swarm_code_state: SectionState::new_swarm(SwarmDomain::Code, code_scope),
             swarm_security_state: SectionState::new_swarm(
                 SwarmDomain::Security(security_sub_mode),
@@ -276,12 +316,87 @@ impl App {
             show_swarm_hub: false,
             should_quit: false,
             tick_count: 0,
+            started_at: Instant::now(),
             total_input_tokens: 0,
             total_output_tokens: 0,
             available_update: None,
+            detected_clis: detect_installed_clis(),
+            model_cache: HashMap::new(),
+            model_picker: None,
             pending_approval: None,
             tools: Arc::new(ToolRegistry::default_registry()),
         }
+    }
+
+    pub fn elapsed_secs(&self) -> f64 {
+        self.started_at.elapsed().as_secs_f64()
+    }
+
+    pub fn is_landing_view(&self) -> bool {
+        self.active_state().is_landing() && !self.is_busy
+    }
+
+    pub fn missing_key_hint(&self) -> Option<String> {
+        if self.config.active_provider.requires_api_key()
+            && self.config.active_settings().api_key.is_none()
+        {
+            let installed: Vec<&str> = self
+                .detected_clis
+                .iter()
+                .filter(|c| c.path.is_some())
+                .map(|c| c.kind.as_str())
+                .collect();
+            if !installed.is_empty() {
+                let examples: Vec<String> = installed
+                    .iter()
+                    .take(3)
+                    .map(|name| format!("/connect {name}"))
+                    .collect();
+                return Some(format!(
+                    "Local CLIs ready: {}  (or set {})",
+                    examples.join(" · "),
+                    self.config
+                        .active_provider
+                        .env_key_name()
+                        .unwrap_or("API_KEY")
+                ));
+            }
+            Some(format!(
+                "Set {} or switch with /provider ollama",
+                self.config
+                    .active_provider
+                    .env_key_name()
+                    .unwrap_or("API_KEY")
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub fn context_usage(&self) -> (u32, u32, u8) {
+        let max_ctx = self.config.active_provider.context_window_tokens().max(1);
+        let estimated_chars: usize = self
+            .active_state()
+            .entries
+            .iter()
+            .map(|e| match e {
+                ChatEntry::User(s)
+                | ChatEntry::Assistant(s)
+                | ChatEntry::System(s)
+                | ChatEntry::Error(s) => s.len(),
+                ChatEntry::SwarmReport { content, .. } | ChatEntry::SwarmLead { content, .. } => {
+                    content.len()
+                }
+                ChatEntry::ToolCall { summary, .. } => summary.len(),
+                ChatEntry::ToolResult { output, diff, .. } => {
+                    output.len() + diff.as_ref().map(|d| d.len()).unwrap_or(0)
+                }
+            })
+            .sum();
+        let estimated_tokens = (estimated_chars / 4) as u32;
+        let used = self.total_input_tokens.max(estimated_tokens);
+        let pct = ((used as u64 * 100) / max_ctx as u64).min(100) as u8;
+        (used, max_ctx, pct)
     }
 
     pub fn active_swarm_domain(&self) -> Option<SwarmDomain> {
@@ -293,14 +408,258 @@ impl App {
     }
 
     pub fn modal_state(&self) -> ModalState {
+        if let Some(ref ob) = self.onboarding {
+            return match ob.step {
+                OnboardingStep::Terms => ModalState::OnboardingTerms,
+                OnboardingStep::Telemetry => ModalState::OnboardingTelemetry,
+                OnboardingStep::Workspace if ob.manual_path_mode => {
+                    ModalState::OnboardingWorkspaceInput
+                }
+                OnboardingStep::Workspace => ModalState::OnboardingWorkspace,
+            };
+        }
         if self.pending_approval.is_some() {
             ModalState::Approval
+        } else if self.model_picker.is_some() {
+            ModalState::ModelPicker
         } else if self.show_swarm_hub {
             ModalState::SwarmHub
         } else if self.show_help {
             ModalState::Help
         } else {
             ModalState::None
+        }
+    }
+
+    pub fn prefetch_models(&self, ui_tx: mpsc::UnboundedSender<UiEvent>) {
+        let cfg = self.config.clone();
+        let provider = cfg.active_provider;
+        tokio::spawn(async move {
+            let models = fetch_models_for_config(&cfg).await;
+            let _ = ui_tx.send(UiEvent::ModelsLoaded { provider, models });
+        });
+    }
+
+    pub fn open_model_picker(&mut self, ui_tx: mpsc::UnboundedSender<UiEvent>) {
+        if self.is_busy {
+            return;
+        }
+        let provider = self.config.active_provider;
+        let current = self.config.active_settings().model.clone();
+        let (models, loading) = match self.model_cache.get(&provider) {
+            Some(cached) if !cached.is_empty() => (cached.clone(), false),
+            _ => {
+                self.prefetch_models(ui_tx);
+                (curated_fallback_models(provider), true)
+            }
+        };
+        let selected = models
+            .iter()
+            .position(|m| m.id == current)
+            .unwrap_or(0);
+        self.show_swarm_hub = false;
+        self.show_help = false;
+        self.model_picker = Some(ModelPickerState {
+            provider,
+            models,
+            filter: String::new(),
+            selected,
+            loading,
+        });
+    }
+
+    pub fn refresh_model_picker(&mut self, ui_tx: mpsc::UnboundedSender<UiEvent>) {
+        if let Some(ref mut picker) = self.model_picker {
+            picker.loading = true;
+        }
+        self.prefetch_models(ui_tx);
+    }
+
+    pub fn model_picker_up(&mut self) {
+        if let Some(ref mut picker) = self.model_picker {
+            if picker.selected > 0 {
+                picker.selected -= 1;
+            }
+        }
+    }
+
+    pub fn model_picker_down(&mut self) {
+        if let Some(ref mut picker) = self.model_picker {
+            let len = picker.filtered_models().len();
+            if len > 0 && picker.selected + 1 < len {
+                picker.selected += 1;
+            }
+        }
+    }
+
+    pub fn model_picker_char(&mut self, c: char) {
+        if let Some(ref mut picker) = self.model_picker {
+            picker.filter.push(c);
+            picker.selected = 0;
+        }
+    }
+
+    pub fn model_picker_backspace(&mut self) {
+        if let Some(ref mut picker) = self.model_picker {
+            picker.filter.pop();
+            picker.selected = 0;
+        }
+    }
+
+    pub fn model_picker_select(&mut self) {
+        let chosen = self.model_picker.as_ref().and_then(|picker| {
+            let filtered = picker.filtered_models();
+            filtered.get(picker.selected).map(|m| m.id.clone())
+        });
+        if let Some(model_id) = chosen {
+            self.config.set_model(model_id.clone());
+            self.model_picker = None;
+            if !self.is_landing_view() {
+                let provider = self.config.active_provider;
+                self.active_state_mut().entries.push(ChatEntry::System(
+                    format!("Active model for {provider} set to '{model_id}'."),
+                ));
+                self.active_state_mut().auto_scroll = true;
+            }
+        }
+    }
+
+    pub fn open_full_setup(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.onboarding = Some(OnboardingState::new_full(
+            self.config.workspace_dir.clone(),
+            self.prefs.telemetry_enabled,
+            !self.prefs.needs_onboarding(),
+        ));
+    }
+
+    pub fn open_folder_picker(&mut self) {
+        if self.is_busy {
+            return;
+        }
+        self.onboarding = Some(OnboardingState::new_folder_picker(
+            self.config.workspace_dir.clone(),
+            self.prefs.telemetry_enabled,
+        ));
+    }
+
+    fn save_preferences(&self) {
+        if let Some(ref path) = self.prefs_path {
+            let _ = self.prefs.save_to(path);
+        }
+    }
+
+    pub fn onboarding_confirm(&mut self) {
+        let step = match self.onboarding.as_ref() {
+            Some(ob) => ob.step,
+            None => return,
+        };
+
+        match step {
+            OnboardingStep::Terms => {
+                self.prefs.accept_terms();
+                if let Some(ref mut ob) = self.onboarding {
+                    ob.step = OnboardingStep::Telemetry;
+                }
+                self.save_preferences();
+            }
+            OnboardingStep::Telemetry => {
+                if let Some(ref mut ob) = self.onboarding {
+                    self.prefs.telemetry_enabled = ob.telemetry_choice;
+                    ob.step = OnboardingStep::Workspace;
+                }
+                self.save_preferences();
+            }
+            OnboardingStep::Workspace => {
+                let result = self
+                    .onboarding
+                    .as_mut()
+                    .map(|ob| ob.confirm_workspace())
+                    .unwrap_or_else(|| Err(String::new()));
+                match result {
+                    Ok(chosen_dir) => {
+                        self.config.workspace_dir = chosen_dir.clone();
+                        self.prefs.record_workspace(chosen_dir.clone());
+                        self.onboarding = None;
+                        self.save_preferences();
+                        if !self.is_landing_view() {
+                            self.active_state_mut().entries.push(ChatEntry::System(
+                                format!("Workspace set to: {}", chosen_dir.display()),
+                            ));
+                        }
+                    }
+                    Err(msg) => {
+                        if !msg.is_empty() {
+                            if let Some(ref mut ob) = self.onboarding {
+                                ob.error_msg = Some(msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn onboarding_cancel(&mut self) {
+        let Some(ref ob) = self.onboarding else {
+            return;
+        };
+        if ob.allow_cancel {
+            self.onboarding = None;
+        } else {
+            self.should_quit = true;
+        }
+    }
+
+    pub fn onboarding_up(&mut self) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.move_up();
+        }
+    }
+
+    pub fn onboarding_down(&mut self) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.move_down();
+        }
+    }
+
+    pub fn onboarding_open_subdir(&mut self) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.open_selected_subdir();
+        }
+    }
+
+    pub fn onboarding_parent(&mut self) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.go_parent();
+        }
+    }
+
+    pub fn onboarding_toggle_manual_path(&mut self) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.toggle_manual_path();
+        }
+    }
+
+    pub fn onboarding_set_telemetry(&mut self, enabled: bool) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.telemetry_choice = enabled;
+        }
+    }
+
+    pub fn onboarding_input_char(&mut self, c: char) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.error_msg = None;
+            ob.manual_path_input.push(c);
+        }
+    }
+
+    pub fn onboarding_input_backspace(&mut self) {
+        if let Some(ref mut ob) = self.onboarding {
+            ob.error_msg = None;
+            ob.manual_path_input.pop();
         }
     }
 
@@ -344,12 +703,14 @@ impl App {
         self.security_sub_mode = mode;
         let domain = SwarmDomain::Security(mode);
         self.swarm_security_state.set_roster_for_domain(domain);
-        self.swarm_security_state.entries.push(ChatEntry::System(format!(
-            "Switched Security Swarm mode to: {} — {}",
-            mode.display_name(),
-            domain.subtitle()
-        )));
-        self.swarm_security_state.auto_scroll = true;
+        if !self.swarm_security_state.is_landing() {
+            self.swarm_security_state.entries.push(ChatEntry::System(format!(
+                "Security mode -> {} ({})",
+                mode.display_name(),
+                domain.subtitle()
+            )));
+            self.swarm_security_state.auto_scroll = true;
+        }
         self.active_section = WorkspaceSection::SwarmSecurity;
         self.show_swarm_hub = false;
         self.show_help = false;
@@ -391,6 +752,7 @@ impl App {
     pub fn close_modals(&mut self) {
         self.show_swarm_hub = false;
         self.show_help = false;
+        self.model_picker = None;
     }
 
     pub fn set_scope(&mut self, raw: Option<&str>) {
@@ -553,14 +915,12 @@ impl App {
         if self.is_busy {
             return;
         }
-        let label = self.active_section.label();
         let st = self.active_state_mut();
         st.session.lock().await.clear();
         st.entries.clear();
         st.streaming_buffer.clear();
         st.reset_roster_idle();
-        st.entries
-            .push(ChatEntry::System(format!("{label} session cleared.")));
+        st.scroll_offset = 0;
         st.auto_scroll = true;
     }
 
@@ -677,15 +1037,18 @@ impl App {
                 event,
             } => self.handle_swarm_event(section, domain, event),
             UiEvent::UpdateAvailable(info) => {
+                let is_landing = self.is_landing_view();
                 let msg = format!(
-                    "Update available: v{} -> v{} ({}). Run /update or 'ecliven update' to upgrade.",
+                    "Update available: v{} -> v{} ({}). Press F5 or run /update to upgrade.",
                     updater::CURRENT_VERSION,
                     info.version,
                     info.html_url
                 );
                 self.available_update = Some(info);
-                self.active_state_mut().entries.push(ChatEntry::System(msg));
-                self.active_state_mut().auto_scroll = true;
+                if !is_landing {
+                    self.active_state_mut().entries.push(ChatEntry::System(msg));
+                    self.active_state_mut().auto_scroll = true;
+                }
             }
             UiEvent::UpdateCheckMessage(msg) => {
                 self.active_state_mut().entries.push(ChatEntry::System(msg));
@@ -707,6 +1070,26 @@ impl App {
                     }
                 }
                 self.active_state_mut().auto_scroll = true;
+            }
+            UiEvent::ModelsLoaded { provider, models } => {
+                self.model_cache.insert(provider, models.clone());
+                if let Some(ref mut picker) = self.model_picker {
+                    if picker.provider == provider {
+                        let current = self.config.active_settings().model.clone();
+                        picker.models = models;
+                        picker.loading = false;
+                        let filtered_len = picker.filtered_models().len();
+                        if picker.filter.is_empty() {
+                            picker.selected = picker
+                                .models
+                                .iter()
+                                .position(|m| m.id == current)
+                                .unwrap_or(0);
+                        } else if picker.selected >= filtered_len {
+                            picker.selected = filtered_len.saturating_sub(1);
+                        }
+                    }
+                }
             }
         }
     }
@@ -949,8 +1332,13 @@ impl App {
                      /swarm security threat [folder]                 Security Threat Model (STRIDE / Config / Deps)\n\
                      /swarm off  (or /chat)                          Return to standard single-agent Chat\n\
                      /scope <folder|off>                             Focus active Swarm on a specific folder/file\n\
+                     /setup                                          Open setup wizard (Terms, Telemetry, Folder)\n\
+                     /folder                                         Choose working folder (also F6)\n\
+                     /telemetry <on|off|status>                      Enable or disable anonymous telemetry\n\
                      /update [check]                                 Check for updates or self-update Ecliven CLI\n\
-                     /provider <anthropic|openai|openrouter|ollama>  Switch active AI provider\n\
+                     /connect [codex|agy|claude|opencode|gemini]     Connect Ecliven to an installed AI CLI\n\
+                     /connect custom <command> [args...]             Connect to any custom local AI CLI\n\
+                     /provider <name>                                Switch API or CLI provider\n\
                      /model <model-name>                             Switch active model\n\
                      /approval <ask|auto-edit|auto-all>              Set tool approval policy\n\
                      /status                                         Show session & provider status\n\
@@ -991,6 +1379,38 @@ impl App {
                     }
                 },
             },
+            "/setup" => {
+                self.open_full_setup();
+            }
+            "/folder" | "/dir" => {
+                self.open_folder_picker();
+            }
+            "/telemetry" => match arg1.map(|s| s.to_ascii_lowercase()).as_deref() {
+                Some("on" | "true" | "enable" | "activar") => {
+                    self.prefs.telemetry_enabled = true;
+                    self.save_preferences();
+                    self.active_state_mut().entries.push(ChatEntry::System(
+                        "Telemetry enabled (anonymous usage metrics only; no code or prompts).".into(),
+                    ));
+                }
+                Some("off" | "false" | "disable" | "desactivar") => {
+                    self.prefs.telemetry_enabled = false;
+                    self.save_preferences();
+                    self.active_state_mut().entries.push(ChatEntry::System(
+                        "Telemetry disabled (zero data collection).".into(),
+                    ));
+                }
+                _ => {
+                    let state = if self.prefs.telemetry_enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    };
+                    self.active_state_mut().entries.push(ChatEntry::System(format!(
+                        "Telemetry is currently {state}. Usage: /telemetry on | /telemetry off"
+                    )));
+                }
+            },
             "/scope" => {
                 self.set_scope(arg1);
             }
@@ -1021,10 +1441,77 @@ impl App {
             "/chat" => {
                 self.switch_section(WorkspaceSection::Chat);
             }
+            "/connect" => {
+                self.detected_clis = detect_installed_clis();
+                match arg1 {
+                    None => {
+                        let mut lines = vec!["External CLI Backends:".to_string()];
+                        for cli in &self.detected_clis {
+                            let status = match &cli.path {
+                                Some(p) => format!("installed ({})", p.display()),
+                                None => "not found in PATH".to_string(),
+                            };
+                            let mark = if cli.path.is_some() { "✓" } else { "○" };
+                            lines.push(format!("  {mark} {:<10} {}", cli.kind.as_str(), status));
+                        }
+                        lines.push(String::new());
+                        lines.push("Connect with: /connect codex | /connect agy | /connect claude | /connect opencode | /connect custom <cmd>".to_string());
+                        self.active_state_mut()
+                            .entries
+                            .push(ChatEntry::System(lines.join("\n")));
+                    }
+                    Some("custom") => {
+                        let rest = raw
+                            .split_once("custom")
+                            .map(|(_, tail)| tail.trim())
+                            .unwrap_or("");
+                        if rest.is_empty() {
+                            self.active_state_mut().entries.push(ChatEntry::Error(
+                                "Usage: /connect custom <command> [args...]".into(),
+                            ));
+                        } else {
+                            self.config.set_custom_cli_command(rest);
+                            self.active_state_mut().entries.push(ChatEntry::System(
+                                format!("Connected to custom CLI command: `{rest}`."),
+                            ));
+                        }
+                    }
+                    Some(target) => match ProviderKind::parse(target) {
+                        Ok(kind) if kind.is_cli_backend() => {
+                            let found = self
+                                .detected_clis
+                                .iter()
+                                .find(|c| c.kind == kind)
+                                .and_then(|c| c.path.as_ref());
+                            self.config.set_provider(kind);
+                            self.prefetch_models(ui_tx.clone());
+                            let note = match found {
+                                Some(p) => format!(
+                                    "Connected to {} CLI ({}).",
+                                    kind.as_str(),
+                                    p.display()
+                                ),
+                                None => format!(
+                                    "Switched to {} CLI (warning: '{}' not found in PATH yet).",
+                                    kind.as_str(),
+                                    kind.default_base_url()
+                                ),
+                            };
+                            self.active_state_mut().entries.push(ChatEntry::System(note));
+                        }
+                        _ => {
+                            self.active_state_mut().entries.push(ChatEntry::Error(format!(
+                                "Unknown CLI '{target}'. Try: /connect codex | /connect agy | /connect claude | /connect opencode | /connect gemini | /connect custom <cmd>"
+                            )));
+                        }
+                    },
+                }
+            }
             "/provider" => match arg1 {
                 Some(name) => match ProviderKind::parse(name) {
                     Ok(kind) => {
                         self.config.set_provider(kind);
+                        self.prefetch_models(ui_tx.clone());
                         let msg = format!(
                             "Switched provider to {} (model: {}).",
                             kind,
@@ -1045,7 +1532,7 @@ impl App {
                     self.active_state_mut().entries.push(ChatEntry::System(msg));
                 }
             },
-            "/model" => match arg1 {
+            "/model" | "/models" => match arg1 {
                 Some(model) => {
                     self.config.set_model(model);
                     let msg = format!(
@@ -1055,11 +1542,7 @@ impl App {
                     self.active_state_mut().entries.push(ChatEntry::System(msg));
                 }
                 None => {
-                    let msg = format!(
-                        "Current model: {}. Usage: /model <model-name>",
-                        self.config.active_settings().model
-                    );
-                    self.active_state_mut().entries.push(ChatEntry::System(msg));
+                    self.open_model_picker(ui_tx.clone());
                 }
             },
             "/approval" => match arg1 {
@@ -1107,8 +1590,13 @@ impl App {
                     .target_scope
                     .as_deref()
                     .unwrap_or("(full workspace)");
+                let telemetry_desc = if self.prefs.telemetry_enabled {
+                    "enabled"
+                } else {
+                    "disabled"
+                };
                 let msg = format!(
-                    "Section:   {section_desc}\nScope:     {scope_desc}\nWorkspace: {}\nProvider:  {} ({})\nModel:     {}\nEndpoint:  {}\nApproval:  {:?}\nTokens:    in={} out={}",
+                    "Section:   {section_desc}\nScope:     {scope_desc}\nWorkspace: {}\nProvider:  {} ({})\nModel:     {}\nEndpoint:  {}\nApproval:  {:?}\nTelemetry: {telemetry_desc}\nTokens:    in={} out={}",
                     self.config.workspace_dir.display(),
                     self.config.active_provider,
                     key_status,

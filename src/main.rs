@@ -20,18 +20,42 @@ async fn main() -> Result<()> {
     updater::cleanup_stale_backup();
 
     let cli = Cli::parse();
-    if let Some(Commands::Update {
-        check_only,
-        version,
-    }) = cli.command
-    {
-        return run_update_command(check_only, version).await;
-    }
-
     let workspace_dir = match cli.dir {
         Some(ref dir) => dir.clone(),
         None => std::env::current_dir()?,
     };
+
+    match cli.command {
+        Some(Commands::Update {
+            check_only,
+            version,
+        }) => {
+            return run_update_command(check_only, version).await;
+        }
+        Some(Commands::Models) => {
+            let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
+            let models = ecliven_code::ai::models::fetch_models_for_config(&config).await;
+            println!(
+                "Available models for {} (active: {}):",
+                config.active_provider,
+                config.active_settings().model
+            );
+            for m in models {
+                let marker = if m.id == config.active_settings().model {
+                    "*"
+                } else {
+                    " "
+                };
+                if m.label == m.id {
+                    println!("  {marker} {}", m.id);
+                } else {
+                    println!("  {marker} {:<32} {}", m.id, m.label);
+                }
+            }
+            return Ok(());
+        }
+        None => {}
+    }
 
     let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
     let initial_swarm: Option<SwarmDomain> = cli.swarm.map(Into::into);
@@ -54,7 +78,7 @@ async fn main() -> Result<()> {
         }
         res
     } else {
-        ecliven_code::tui::run_tui(config, initial_swarm, initial_scope).await
+        ecliven_code::tui::run_tui(config, initial_swarm, initial_scope, cli.setup).await
     }
 }
 

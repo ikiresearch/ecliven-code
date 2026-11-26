@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::ai::anthropic::AnthropicProvider;
+use crate::ai::cli_backend::ExternalCliProvider;
 use crate::ai::ollama::OllamaProvider;
 use crate::ai::openai::OpenAiCompatibleProvider;
 use crate::ai::{AiError, LlmProvider};
@@ -51,6 +52,17 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn LlmProvider>, AiErro
         ProviderKind::Ollama => Ok(Arc::new(OllamaProvider::new(
             settings.base_url.clone(),
             settings.model.clone(),
+        ))),
+        ProviderKind::CodexCli
+        | ProviderKind::AgyCli
+        | ProviderKind::ClaudeCli
+        | ProviderKind::OpenCodeCli
+        | ProviderKind::GeminiCli
+        | ProviderKind::CustomCli => Ok(Arc::new(ExternalCliProvider::new(
+            kind,
+            settings.base_url.clone(),
+            settings.model.clone(),
+            config.workspace_dir.clone(),
         ))),
     }
 }

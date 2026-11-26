@@ -1,4 +1,5 @@
 pub mod defaults;
+pub mod preferences;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -11,7 +12,9 @@ use defaults::*;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("Unknown provider '{0}'. Supported: anthropic, openai, openrouter, ollama")]
+    #[error(
+        "Unknown provider '{0}'. Supported: anthropic, openai, openrouter, ollama, codex, agy, claude, opencode, gemini, cli"
+    )]
     UnknownProvider(String),
 
     #[error("Failed to read config file {path}: {source}")]
@@ -34,24 +37,63 @@ pub enum ProviderKind {
     OpenAi,
     OpenRouter,
     Ollama,
+    CodexCli,
+    AgyCli,
+    ClaudeCli,
+    OpenCodeCli,
+    GeminiCli,
+    CustomCli,
 }
 
 impl ProviderKind {
+    pub const ALL: [Self; 10] = [
+        Self::Anthropic,
+        Self::OpenAi,
+        Self::OpenRouter,
+        Self::Ollama,
+        Self::CodexCli,
+        Self::AgyCli,
+        Self::ClaudeCli,
+        Self::OpenCodeCli,
+        Self::GeminiCli,
+        Self::CustomCli,
+    ];
+
+    pub const EXTERNAL_CLIS: [Self; 5] = [
+        Self::CodexCli,
+        Self::AgyCli,
+        Self::ClaudeCli,
+        Self::OpenCodeCli,
+        Self::GeminiCli,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
             Self::OpenRouter => "openrouter",
             Self::Ollama => "ollama",
+            Self::CodexCli => "codex",
+            Self::AgyCli => "agy",
+            Self::ClaudeCli => "claude",
+            Self::OpenCodeCli => "opencode",
+            Self::GeminiCli => "gemini",
+            Self::CustomCli => "cli",
         }
     }
 
     pub fn parse(input: &str) -> Result<Self, ConfigError> {
         match input.trim().to_ascii_lowercase().as_str() {
-            "anthropic" | "claude" => Ok(Self::Anthropic),
+            "anthropic" => Ok(Self::Anthropic),
             "openai" => Ok(Self::OpenAi),
             "openrouter" => Ok(Self::OpenRouter),
             "ollama" | "local" => Ok(Self::Ollama),
+            "codex" | "codex-cli" => Ok(Self::CodexCli),
+            "agy" | "agy-cli" | "antigravity" => Ok(Self::AgyCli),
+            "claude" | "claude-cli" | "claude-code" => Ok(Self::ClaudeCli),
+            "opencode" | "opencode-cli" => Ok(Self::OpenCodeCli),
+            "gemini" | "gemini-cli" => Ok(Self::GeminiCli),
+            "cli" | "custom" | "custom-cli" => Ok(Self::CustomCli),
             other => Err(ConfigError::UnknownProvider(other.to_string())),
         }
     }
@@ -62,6 +104,12 @@ impl ProviderKind {
             Self::OpenAi => DEFAULT_OPENAI_MODEL,
             Self::OpenRouter => DEFAULT_OPENROUTER_MODEL,
             Self::Ollama => DEFAULT_OLLAMA_MODEL,
+            Self::CodexCli
+            | Self::AgyCli
+            | Self::ClaudeCli
+            | Self::OpenCodeCli
+            | Self::GeminiCli
+            | Self::CustomCli => DEFAULT_CLI_MODEL,
         }
     }
 
@@ -71,11 +119,29 @@ impl ProviderKind {
             Self::OpenAi => DEFAULT_OPENAI_BASE_URL,
             Self::OpenRouter => DEFAULT_OPENROUTER_BASE_URL,
             Self::Ollama => DEFAULT_OLLAMA_BASE_URL,
+            Self::CodexCli => "codex",
+            Self::AgyCli => "agy",
+            Self::ClaudeCli => "claude",
+            Self::OpenCodeCli => "opencode",
+            Self::GeminiCli => "gemini",
+            Self::CustomCli => "",
         }
     }
 
+    pub fn is_cli_backend(&self) -> bool {
+        matches!(
+            self,
+            Self::CodexCli
+                | Self::AgyCli
+                | Self::ClaudeCli
+                | Self::OpenCodeCli
+                | Self::GeminiCli
+                | Self::CustomCli
+        )
+    }
+
     pub fn requires_api_key(&self) -> bool {
-        !matches!(self, Self::Ollama)
+        matches!(self, Self::Anthropic | Self::OpenAi | Self::OpenRouter)
     }
 
     pub fn env_key_name(&self) -> Option<&'static str> {
@@ -83,7 +149,17 @@ impl ProviderKind {
             Self::Anthropic => Some("ANTHROPIC_API_KEY"),
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
-            Self::Ollama => None,
+            _ => None,
+        }
+    }
+
+    pub fn context_window_tokens(&self) -> u32 {
+        match self {
+            Self::Anthropic | Self::ClaudeCli | Self::AgyCli => 200_000,
+            Self::OpenAi | Self::OpenRouter | Self::CodexCli | Self::OpenCodeCli => 128_000,
+            Self::GeminiCli => 1_000_000,
+            Self::Ollama => 32_768,
+            Self::CustomCli => 128_000,
         }
     }
 }
@@ -151,12 +227,19 @@ struct FileProvidersConfig {
     openai: Option<FileProviderEntry>,
     openrouter: Option<FileProviderEntry>,
     ollama: Option<FileProviderEntry>,
+    codex: Option<FileProviderEntry>,
+    agy: Option<FileProviderEntry>,
+    claude: Option<FileProviderEntry>,
+    opencode: Option<FileProviderEntry>,
+    gemini: Option<FileProviderEntry>,
+    cli: Option<FileProviderEntry>,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct FileProviderEntry {
     model: Option<String>,
     base_url: Option<String>,
+    command: Option<String>,
     api_key: Option<String>,
 }
 
@@ -170,12 +253,7 @@ pub struct CliOverrides {
 impl AppConfig {
     pub fn default_for_workspace(workspace_dir: PathBuf) -> Self {
         let mut providers = HashMap::new();
-        for kind in [
-            ProviderKind::Anthropic,
-            ProviderKind::OpenAi,
-            ProviderKind::OpenRouter,
-            ProviderKind::Ollama,
-        ] {
+        for kind in ProviderKind::ALL {
             providers.insert(
                 kind,
                 ProviderSettings {
@@ -262,6 +340,14 @@ impl AppConfig {
         self.active_settings_mut().model = model.into();
     }
 
+    pub fn set_custom_cli_command(&mut self, command: impl Into<String>) {
+        self.active_provider = ProviderKind::CustomCli;
+        self.providers
+            .get_mut(&ProviderKind::CustomCli)
+            .unwrap()
+            .base_url = command.into();
+    }
+
     fn apply_file(&mut self, path: &Path) -> Result<(), ConfigError> {
         let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
             path: path.to_path_buf(),
@@ -296,6 +382,12 @@ impl AppConfig {
             self.merge_provider_entry(ProviderKind::OpenAi, providers.openai);
             self.merge_provider_entry(ProviderKind::OpenRouter, providers.openrouter);
             self.merge_provider_entry(ProviderKind::Ollama, providers.ollama);
+            self.merge_provider_entry(ProviderKind::CodexCli, providers.codex);
+            self.merge_provider_entry(ProviderKind::AgyCli, providers.agy);
+            self.merge_provider_entry(ProviderKind::ClaudeCli, providers.claude);
+            self.merge_provider_entry(ProviderKind::OpenCodeCli, providers.opencode);
+            self.merge_provider_entry(ProviderKind::GeminiCli, providers.gemini);
+            self.merge_provider_entry(ProviderKind::CustomCli, providers.cli);
         }
 
         if let Some(model) = parsed.model {
@@ -310,6 +402,9 @@ impl AppConfig {
             if let Some(settings) = self.providers.get_mut(&kind) {
                 if let Some(model) = entry.model {
                     settings.model = model;
+                }
+                if let Some(cmd) = entry.command {
+                    settings.base_url = cmd;
                 }
                 if let Some(base_url) = entry.base_url {
                     settings.base_url = base_url;
@@ -335,25 +430,50 @@ impl AppConfig {
         }
 
         if let Some(key) = non_empty("ANTHROPIC_API_KEY") {
-            self.providers.get_mut(&ProviderKind::Anthropic).unwrap().api_key = Some(key);
+            self.providers
+                .get_mut(&ProviderKind::Anthropic)
+                .unwrap()
+                .api_key = Some(key);
         }
         if let Some(url) = non_empty("ANTHROPIC_BASE_URL") {
-            self.providers.get_mut(&ProviderKind::Anthropic).unwrap().base_url = url;
+            self.providers
+                .get_mut(&ProviderKind::Anthropic)
+                .unwrap()
+                .base_url = url;
         }
 
         if let Some(key) = non_empty("OPENAI_API_KEY") {
-            self.providers.get_mut(&ProviderKind::OpenAi).unwrap().api_key = Some(key);
+            self.providers
+                .get_mut(&ProviderKind::OpenAi)
+                .unwrap()
+                .api_key = Some(key);
         }
         if let Some(url) = non_empty("OPENAI_BASE_URL") {
-            self.providers.get_mut(&ProviderKind::OpenAi).unwrap().base_url = url;
+            self.providers
+                .get_mut(&ProviderKind::OpenAi)
+                .unwrap()
+                .base_url = url;
         }
 
         if let Some(key) = non_empty("OPENROUTER_API_KEY") {
-            self.providers.get_mut(&ProviderKind::OpenRouter).unwrap().api_key = Some(key);
+            self.providers
+                .get_mut(&ProviderKind::OpenRouter)
+                .unwrap()
+                .api_key = Some(key);
         }
 
         if let Some(url) = non_empty("OLLAMA_BASE_URL") {
-            self.providers.get_mut(&ProviderKind::Ollama).unwrap().base_url = url;
+            self.providers
+                .get_mut(&ProviderKind::Ollama)
+                .unwrap()
+                .base_url = url;
+        }
+
+        if let Some(cmd) = non_empty("ECLIVEN_CLI_CMD") {
+            self.providers
+                .get_mut(&ProviderKind::CustomCli)
+                .unwrap()
+                .base_url = cmd;
         }
 
         if let Some(model) = non_empty("ECLIVEN_MODEL") {
@@ -401,6 +521,23 @@ mod tests {
         assert_eq!(cfg.active_provider, ProviderKind::OpenAi);
         assert_eq!(cfg.active_settings().model, "gpt-4.1-mini");
         assert_eq!(cfg.active_settings().api_key.as_deref(), Some("sk-test-123"));
+    }
+
+    #[test]
+    fn parses_external_cli_providers_without_api_key_requirement() {
+        for (raw, expected) in [
+            ("codex", ProviderKind::CodexCli),
+            ("agy", ProviderKind::AgyCli),
+            ("claude", ProviderKind::ClaudeCli),
+            ("opencode", ProviderKind::OpenCodeCli),
+            ("gemini", ProviderKind::GeminiCli),
+            ("cli", ProviderKind::CustomCli),
+        ] {
+            let parsed = ProviderKind::parse(raw).unwrap();
+            assert_eq!(parsed, expected);
+            assert!(parsed.is_cli_backend());
+            assert!(!parsed.requires_api_key());
+        }
     }
 
     #[test]

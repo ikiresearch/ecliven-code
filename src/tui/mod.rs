@@ -1,5 +1,7 @@
 pub mod app;
+pub mod eclipse;
 pub mod keybindings;
+pub mod onboarding;
 pub mod theme;
 pub mod ui;
 
@@ -19,6 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
+use crate::config::preferences::UserPreferences;
 use crate::config::AppConfig;
 use crate::swarm::domain::{SecuritySubMode, SwarmDomain};
 use crate::tui::app::{App, UiEvent, WorkspaceSection};
@@ -29,6 +32,7 @@ pub async fn run_tui(
     config: AppConfig,
     initial_swarm: Option<SwarmDomain>,
     initial_scope: Option<String>,
+    force_setup: bool,
 ) -> Result<()> {
     install_panic_hook();
     enable_raw_mode()?;
@@ -38,7 +42,16 @@ pub async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = App::new(config, initial_swarm, initial_scope);
+    let prefs = UserPreferences::load_default();
+    let prefs_path = UserPreferences::default_path();
+    let mut app = App::with_preferences(
+        config,
+        initial_swarm,
+        initial_scope,
+        prefs,
+        prefs_path,
+        force_setup,
+    );
     let run_result = event_loop(&mut terminal, &mut app).await;
 
     disable_raw_mode()?;
@@ -58,7 +71,7 @@ async fn event_loop(
 ) -> Result<()> {
     let mut reader = EventStream::new();
     let (ui_tx, mut ui_rx) = mpsc::unbounded_channel::<UiEvent>();
-    let mut tick = tokio::time::interval(Duration::from_millis(120));
+    let mut tick = tokio::time::interval(Duration::from_millis(65));
 
     let update_tx = ui_tx.clone();
     tokio::spawn(async move {
@@ -66,6 +79,8 @@ async fn event_loop(
             let _ = update_tx.send(UiEvent::UpdateAvailable(latest));
         }
     });
+
+    app.prefetch_models(ui_tx.clone());
 
     loop {
         terminal.draw(|frame| ui::render(frame, app))?;
@@ -76,7 +91,8 @@ async fn event_loop(
 
         tokio::select! {
             _ = tick.tick() => {
-                if app.is_busy {
+                let picker_loading = app.model_picker.as_ref().is_some_and(|p| p.loading);
+                if app.is_busy || app.is_landing_view() || app.onboarding.is_some() || picker_loading {
                     app.tick_count = app.tick_count.wrapping_add(1);
                 }
             }
@@ -115,6 +131,14 @@ async fn event_loop(
                                     app.trigger_quick_update(ui_tx.clone());
                                 }
                             }
+                            Action::OpenFolderPicker => app.open_folder_picker(),
+                            Action::OpenModelPicker => app.open_model_picker(ui_tx.clone()),
+                            Action::ModelPickerUp => app.model_picker_up(),
+                            Action::ModelPickerDown => app.model_picker_down(),
+                            Action::ModelPickerSelect => app.model_picker_select(),
+                            Action::ModelPickerRefresh => app.refresh_model_picker(ui_tx.clone()),
+                            Action::ModelPickerChar(c) => app.model_picker_char(c),
+                            Action::ModelPickerBackspace => app.model_picker_backspace(),
                             Action::SelectChatSection => app.switch_section(WorkspaceSection::Chat),
                             Action::SelectSwarmCode => app.switch_section(WorkspaceSection::SwarmCode),
                             Action::SelectSwarmSecurityDefense => {
@@ -126,6 +150,17 @@ async fn event_loop(
                             Action::CloseModal => app.close_modals(),
                             Action::ApproveYes => app.resolve_approval(true),
                             Action::ApproveNo => app.resolve_approval(false),
+                            Action::OnboardingConfirm => app.onboarding_confirm(),
+                            Action::OnboardingCancel => app.onboarding_cancel(),
+                            Action::OnboardingUp => app.onboarding_up(),
+                            Action::OnboardingDown => app.onboarding_down(),
+                            Action::OnboardingOpenSubdir => app.onboarding_open_subdir(),
+                            Action::OnboardingParent => app.onboarding_parent(),
+                            Action::OnboardingToggleManualPath => app.onboarding_toggle_manual_path(),
+                            Action::OnboardingTelemetryOn => app.onboarding_set_telemetry(true),
+                            Action::OnboardingTelemetryOff => app.onboarding_set_telemetry(false),
+                            Action::OnboardingInputChar(c) => app.onboarding_input_char(c),
+                            Action::OnboardingInputBackspace => app.onboarding_input_backspace(),
                             Action::None => {}
                         }
                     }

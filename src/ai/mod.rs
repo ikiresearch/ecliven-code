@@ -1,4 +1,6 @@
 pub mod anthropic;
+pub mod cli_backend;
+pub mod models;
 pub mod ollama;
 pub mod openai;
 pub mod registry;
@@ -22,6 +24,13 @@ pub enum AiError {
 
     #[error("Provider returned HTTP {status}: {body}")]
     ApiStatus { status: u16, body: String },
+
+    #[error("CLI '{cli}' failed (exit {code}): {output}")]
+    CliFailed {
+        cli: String,
+        code: i32,
+        output: String,
+    },
 
     #[error("Failed to parse provider response: {0}")]
     Parse(String),
