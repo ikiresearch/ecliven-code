@@ -91,6 +91,13 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
+        Some(Commands::Index { rebuild }) => {
+            let arg = if rebuild { "rebuild" } else { "" };
+            let msg = ecliven_code::knowledge::commands::run(&workspace_dir, "/index", arg)
+                .map_err(anyhow::Error::msg)?;
+            println!("{msg}");
+            return Ok(());
+        }
         Some(Commands::Mcp) => {
             let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
             let conns = mcp::connect_all(&config.mcp_servers).await;
@@ -157,6 +164,10 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
         config.effective_compact_percent(),
     )
     .with_saver_mode(config.saver_mode);
+    let engine = match config.brief_options() {
+        Some(opts) => engine.with_knowledge(opts, config.knowledge.workflow),
+        None => engine,
+    };
 
     let mut session = Session::new();
     if let Some(store) = SessionStore::default_store() {

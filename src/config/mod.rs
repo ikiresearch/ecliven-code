@@ -223,6 +223,31 @@ pub struct AppConfig {
     /// `provider/model` refs for Swarm workers (round-robin); empty = active model.
     pub swarm_worker_models: Vec<String>,
     pub swarm_lead_model: Option<String>,
+    pub knowledge: KnowledgeConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct KnowledgeConfig {
+    /// Inject the project brief and expose knowledge tools.
+    pub enabled: bool,
+    /// Brief budget in tokens (default 1500, 600 in saver mode).
+    pub brief_tokens: Option<usize>,
+    /// Follow the inspect → plan → change → verify → review → report → remember loop.
+    pub workflow: bool,
+    /// `provider/model` used for semantic search (ollama, openai or openrouter).
+    pub embeddings: Option<String>,
+}
+
+impl Default for KnowledgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            brief_tokens: None,
+            workflow: false,
+            embeddings: None,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -259,6 +284,7 @@ fn default_true() -> bool {
 struct FileConfig {
     router: Option<crate::ai::router::RouterConfig>,
     saver_mode: Option<bool>,
+    knowledge: Option<KnowledgeConfig>,
     swarm: Option<FileSwarmConfig>,
     sandbox_mode: Option<SandboxMode>,
     sandbox_network: Option<bool>,
@@ -340,6 +366,7 @@ impl AppConfig {
             saver_mode: false,
             swarm_worker_models: Vec::new(),
             swarm_lead_model: None,
+            knowledge: KnowledgeConfig::default(),
         }
     }
 
@@ -366,8 +393,33 @@ impl AppConfig {
     }
 
     pub fn tool_context(&self) -> crate::tools::ToolContext {
+        let embedding = self
+            .knowledge
+            .embeddings
+            .as_deref()
+            .and_then(|raw| crate::knowledge::EmbeddingClient::from_config(self, raw).ok());
         crate::tools::ToolContext::new(self.workspace_dir.clone(), self.shell_timeout_secs)
             .with_sandbox(self.sandbox_policy())
+            .with_knowledge(crate::tools::KnowledgeSettings {
+                saver: self.saver_mode,
+                embedding,
+            })
+    }
+
+    /// Brief options for the current mode, or `None` when knowledge is disabled.
+    pub fn brief_options(&self) -> Option<crate::knowledge::BriefOptions> {
+        if !self.knowledge.enabled {
+            return None;
+        }
+        let mut opts = if self.saver_mode {
+            crate::knowledge::BriefOptions::saver()
+        } else {
+            crate::knowledge::BriefOptions::standard()
+        };
+        if let Some(tokens) = self.knowledge.brief_tokens {
+            opts.budget_tokens = if self.saver_mode { tokens.min(opts.budget_tokens) } else { tokens };
+        }
+        Some(opts)
     }
 
     pub fn load(workspace_dir: PathBuf, overrides: &CliOverrides) -> Result<Self, ConfigError> {
@@ -487,6 +539,9 @@ impl AppConfig {
         }
         if let Some(router) = parsed.router {
             self.router = router;
+        }
+        if let Some(knowledge) = parsed.knowledge {
+            self.knowledge = knowledge;
         }
         if let Some(saver) = parsed.saver_mode {
             self.saver_mode = saver;
@@ -740,6 +795,10 @@ lead = "anthropic/test-lead"
 enabled = true
 cheap = "ollama/test-small"
 
+[knowledge]
+workflow = true
+brief_tokens = 900
+
 [router.specialties]
 security = "openrouter/test/sec"
 
@@ -767,6 +826,8 @@ trusted = true
         assert!(!cfg.sandbox_network);
         assert_eq!(cfg.auto_compact_percent, 70);
         assert_eq!(cfg.effective_compact_percent(), 60);
+        assert!(cfg.knowledge.enabled && cfg.knowledge.workflow);
+        assert_eq!(cfg.brief_options().unwrap().budget_tokens, 600);
         assert!(cfg.saver_mode && cfg.router.enabled);
         assert_eq!(cfg.router.cheap.as_deref(), Some("ollama/test-small"));
         assert_eq!(cfg.router.specialties["security"], "openrouter/test/sec");

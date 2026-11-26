@@ -1287,6 +1287,10 @@ impl App {
                 self.config.effective_compact_percent(),
             )
             .with_saver_mode(self.config.saver_mode);
+            let engine = match self.config.brief_options() {
+                Some(opts) => engine.with_knowledge(opts, self.config.knowledge.workflow),
+                None => engine,
+            };
 
             tokio::spawn(async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -1649,6 +1653,10 @@ impl App {
                      /router [on|off]                                Auto-pick model by difficulty, cost, specialty\n\
                      /saver [on|off]                                 Saver mode: minimize tokens and cost\n\
                      /swarm-models                                   Show models used by Swarm agents\n\
+                     /memory [search <q>|add <text>|forget <id>|confirm <id>|stale]  Project and user memory\n\
+                     /index [rebuild]                                Refresh or rebuild the code index\n\
+                     /tasks | /goal <text> | /goal done              Task history and active goal\n\
+                     /workflow [on|off]                              Guided inspect-plan-verify-remember loop\n\
                      /status                                         Show session & provider status\n\
                      /clear                                          Clear current tab history\n\
                      /quit                                           Exit Ecliven Code\n\n\
@@ -1928,6 +1936,34 @@ impl App {
             "/compact" => self.compact_active_session(ui_tx),
             "/undo" | "/revert" => self.undo_last_checkpoint().await,
             "/checkpoints" => self.list_checkpoints().await,
+            "/memory" | "/index" | "/tasks" | "/goal" => {
+                let ws = self.config.workspace_dir.clone();
+                let name = cmd.to_string();
+                let rest = raw.trim().strip_prefix(cmd).unwrap_or("").trim().to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::knowledge::commands::run(&ws, &name, &rest)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+                match result {
+                    Ok(msg) => self.push_system(msg),
+                    Err(e) => self.push_error(e),
+                }
+            }
+            "/workflow" => {
+                match arg1 {
+                    Some("on") => self.config.knowledge.workflow = true,
+                    Some("off") => self.config.knowledge.workflow = false,
+                    Some(_) => return self.push_error("Usage: /workflow [on|off]"),
+                    None => {}
+                }
+                let msg = format!(
+                    "Workflow mode {}.",
+                    if self.config.knowledge.workflow { "on" } else { "off" }
+                );
+                self.push_system(msg);
+            }
             "/sessions" | "/history" => self.list_sessions(),
             "/resume" => self.resume_session(arg1.unwrap_or("last")).await,
             "/mcp" => {

@@ -32,6 +32,12 @@ pub enum Commands {
     },
     /// List configured MCP servers and the tools they expose
     Mcp,
+    /// Refresh the project code index (only changed files are re-parsed)
+    Index {
+        /// Drop the index and re-parse every file
+        #[arg(long)]
+        rebuild: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
