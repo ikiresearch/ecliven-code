@@ -240,6 +240,14 @@ const HARNESS_PREFIXES: &[&str] = &[
 /// Manifests candidates may legitimately edit (dependencies), but not their test settings.
 const MANIFESTS: &[&str] = &["cargo.toml", "package.json", "pyproject.toml"];
 
+/// Workspace-relative path with `/` separators on every platform.
+pub fn rel_string(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 fn file_name_lower(rel: &Path) -> String {
     rel.file_name()
         .map(|n| n.to_string_lossy().to_ascii_lowercase())
@@ -272,7 +280,7 @@ pub struct Guarded {
 pub fn guard_harness(copy: &Path, deltas: Vec<FileDelta>) -> io::Result<Guarded> {
     let mut out = Guarded::default();
     for d in deltas {
-        let rel = d.rel.display().to_string();
+        let rel = rel_string(&d.rel);
         if is_protected(&d.rel, d.old.is_some()) {
             let target = copy.join(&d.rel);
             match &d.old {
@@ -324,7 +332,7 @@ pub fn protected_changes(
     before
         .iter()
         .filter(|(rel, bytes)| std::fs::read(root.join(rel)).ok().as_ref() != Some(*bytes))
-        .map(|(rel, _)| rel.display().to_string())
+        .map(|(rel, _)| rel_string(rel))
         .collect()
 }
 
@@ -483,7 +491,7 @@ mod tests {
         let kept: Vec<String> = g
             .deltas
             .iter()
-            .map(|d| d.rel.display().to_string())
+            .map(|d| rel_string(&d.rel))
             .collect();
         assert_eq!(kept, vec!["package.json", "src/a.rs", "tests/new_test.rs"]);
         assert_eq!(
