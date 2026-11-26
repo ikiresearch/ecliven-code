@@ -27,7 +27,12 @@ impl Session {
     }
 
     pub fn from_loaded(loaded: LoadedSession) -> Self {
-        let next_checkpoint_seq = loaded.checkpoints.iter().map(|c| c.seq + 1).max().unwrap_or(0);
+        let next_checkpoint_seq = loaded
+            .checkpoints
+            .iter()
+            .map(|c| c.seq + 1)
+            .max()
+            .unwrap_or(0);
         Self {
             messages: loaded.messages,
             checkpoints: loaded.checkpoints,

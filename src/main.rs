@@ -152,7 +152,10 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
             approval_mode: config.approval_mode,
         },
     )
-    .with_compaction(config.context_window_tokens(), config.effective_compact_percent())
+    .with_compaction(
+        config.context_window_tokens(),
+        config.effective_compact_percent(),
+    )
     .with_saver_mode(config.saver_mode);
 
     let mut session = Session::new();
@@ -250,7 +253,11 @@ async fn run_headless_swarm(
         Arc::new(ToolRegistry::default_registry()),
         config.tool_context(),
         SwarmOptions {
-            max_tokens: if saver { config.max_tokens.min(2048) } else { config.max_tokens },
+            max_tokens: if saver {
+                config.max_tokens.min(2048)
+            } else {
+                config.max_tokens
+            },
             temperature: config.temperature,
             worker_max_iterations: if saver { 4 } else { 8 },
             lead_max_iterations: config.max_tool_iterations,

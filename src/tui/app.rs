@@ -469,7 +469,9 @@ impl App {
                     let skipped: Vec<String> = report
                         .skipped
                         .iter()
-                        .map(|(p, why)| format!("{} ({why})", p.strip_prefix(&root).unwrap_or(p).display()))
+                        .map(|(p, why)| {
+                            format!("{} ({why})", p.strip_prefix(&root).unwrap_or(p).display())
+                        })
                         .collect();
                     self.push_error(format!(
                         "Could not restore (no snapshot, left untouched): {}",
@@ -1239,7 +1241,11 @@ impl App {
                 Arc::clone(&self.tools),
                 tool_ctx,
                 SwarmOptions {
-                    max_tokens: if saver { self.config.max_tokens.min(2048) } else { self.config.max_tokens },
+                    max_tokens: if saver {
+                        self.config.max_tokens.min(2048)
+                    } else {
+                        self.config.max_tokens
+                    },
                     temperature: self.config.temperature,
                     worker_max_iterations: if saver { 4 } else { 8 },
                     lead_max_iterations: self.config.max_tool_iterations,
@@ -1457,8 +1463,9 @@ impl App {
                     .ok()
                     .and_then(|mut s| s.take_persist_error());
                 if let Some(err) = persist_error {
-                    st.entries
-                        .push(ChatEntry::Error(format!("Session could not be saved: {err}")));
+                    st.entries.push(ChatEntry::Error(format!(
+                        "Session could not be saved: {err}"
+                    )));
                 }
             }
         }

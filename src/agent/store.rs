@@ -25,15 +25,21 @@ pub struct SessionMeta {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Record {
     Meta(SessionMeta),
-    Message { message: Message },
-    Replace { messages: Vec<Message> },
+    Message {
+        message: Message,
+    },
+    Replace {
+        messages: Vec<Message>,
+    },
     CheckpointFile {
         seq: u64,
         label: String,
         path: PathBuf,
         original: FileOriginal,
     },
-    CheckpointPop { seq: u64 },
+    CheckpointPop {
+        seq: u64,
+    },
 }
 
 /// Everything restored from a session file.
@@ -114,7 +120,13 @@ impl SessionRecorder {
         });
     }
 
-    pub fn record_checkpoint_file(&mut self, seq: u64, label: &str, path: &Path, original: &FileOriginal) {
+    pub fn record_checkpoint_file(
+        &mut self,
+        seq: u64,
+        label: &str,
+        path: &Path,
+        original: &FileOriginal,
+    ) {
         self.append_or_remember(&Record::CheckpointFile {
             seq,
             label: label.to_string(),
@@ -381,7 +393,9 @@ mod tests {
 
         let found = store.find("last", tmp.path()).unwrap();
         let mut reloaded = Session::from_loaded(load_session(&found.path).unwrap());
-        let cp = reloaded.pop_checkpoint().expect("first checkpoint persisted");
+        let cp = reloaded
+            .pop_checkpoint()
+            .expect("first checkpoint persisted");
         assert_eq!(cp.label, "first");
         cp.restore().unwrap();
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "v1");
