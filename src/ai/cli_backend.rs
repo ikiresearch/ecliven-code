@@ -2,14 +2,20 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use async_trait::async_trait;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::time::Duration;
+
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::ai::{
     AiError, CompletionRequest, CompletionResponse, LlmProvider, Message, Role, TokenUsage,
 };
+use crate::ai::cli_events::{CliFormat, CliTranscript};
 use crate::config::ProviderKind;
+use crate::tools::sandbox::SandboxMode;
+
+pub const DEFAULT_CLI_TIMEOUT_SECS: u64 = 900;
 
 #[derive(Debug, Clone)]
 pub struct DetectedCli {
@@ -68,9 +74,58 @@ pub struct ExternalCliProvider {
     binary_or_cmd: String,
     model: String,
     workspace_dir: PathBuf,
+    timeout: Duration,
+    sandbox: SandboxMode,
+}
+
+/// Kills the CLI and every process it spawned when dropped (timeout or cancelled turn).
+struct ProcessTreeGuard {
+    pid: Option<u32>,
+}
+
+impl ProcessTreeGuard {
+    fn disarm(&mut self) {
+        self.pid = None;
+    }
+}
+
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        let Some(pid) = self.pid else { return };
+        #[cfg(unix)]
+        // SAFETY: plain syscall; the child leads its own process group (pgid == pid).
+        unsafe {
+            libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+        }
+        #[cfg(windows)]
+        {
+            let _ = std::process::Command::new("taskkill")
+                .args(["/T", "/F", "/PID", &pid.to_string()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+        #[cfg(not(any(unix, windows)))]
+        let _ = pid;
+    }
 }
 
 impl ExternalCliProvider {
+    /// Bounds each run and maps the sandbox mode onto the CLI's own permission flags.
+    pub fn with_limits(mut self, timeout_secs: u64, sandbox: SandboxMode) -> Self {
+        self.timeout = Duration::from_secs(timeout_secs.max(1));
+        self.sandbox = sandbox;
+        self
+    }
+
+    fn format(&self) -> CliFormat {
+        match self.kind {
+            ProviderKind::CodexCli => CliFormat::CodexJson,
+            ProviderKind::ClaudeCli => CliFormat::ClaudeStream,
+            _ => CliFormat::Text,
+        }
+    }
+
     pub fn new(
         kind: ProviderKind,
         binary_or_cmd: String,
@@ -82,6 +137,8 @@ impl ExternalCliProvider {
             binary_or_cmd,
             model,
             workspace_dir,
+            timeout: Duration::from_secs(DEFAULT_CLI_TIMEOUT_SECS),
+            sandbox: SandboxMode::WorkspaceWrite,
         }
     }
 
@@ -98,6 +155,9 @@ impl ExternalCliProvider {
                     "never".to_string(),
                     "-C".to_string(),
                     self.workspace_dir.display().to_string(),
+                    "--json".to_string(),
+                    "--sandbox".to_string(),
+                    self.sandbox.as_str().to_string(),
                 ];
                 if let Some(m) = custom_model {
                     args.push("-m".to_string());
@@ -117,10 +177,18 @@ impl ExternalCliProvider {
                 Ok((self.binary_or_cmd.clone(), args, false))
             }
             ProviderKind::ClaudeCli => {
+                let permission = match self.sandbox {
+                    SandboxMode::ReadOnly => "plan",
+                    SandboxMode::WorkspaceWrite => "acceptEdits",
+                    SandboxMode::DangerFullAccess => "bypassPermissions",
+                };
                 let mut args = vec![
                     "--print".to_string(),
                     "--output-format".to_string(),
-                    "text".to_string(),
+                    "stream-json".to_string(),
+                    "--verbose".to_string(),
+                    "--permission-mode".to_string(),
+                    permission.to_string(),
                 ];
                 if let Some(m) = custom_model {
                     args.push("--model".to_string());
@@ -260,13 +328,17 @@ impl LlmProvider for ExternalCliProvider {
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         let mut child = cmd.spawn().map_err(|err| {
             AiError::Parse(format!(
                 "Failed to start external CLI '{program}': {err}. Is it installed and on your PATH?"
             ))
         })?;
+        let mut guard = ProcessTreeGuard { pid: child.id() };
 
         if pipe_stdin {
             if let Some(mut stdin) = child.stdin.take() {
@@ -278,7 +350,7 @@ impl LlmProvider for ExternalCliProvider {
             }
         }
 
-        let mut stdout = child
+        let stdout = child
             .stdout
             .take()
             .ok_or_else(|| AiError::Parse("Failed to capture CLI stdout".into()))?;
@@ -293,55 +365,70 @@ impl LlmProvider for ExternalCliProvider {
             String::from_utf8_lossy(&err_buf).to_string()
         });
 
-        let mut full_output = String::new();
-        let mut chunk = [0u8; 1024];
-        loop {
-            match stdout.read(&mut chunk).await {
-                Ok(0) => break,
-                Ok(n) => {
-                    let text = String::from_utf8_lossy(&chunk[..n]).to_string();
-                    full_output.push_str(&text);
+        let format = self.format();
+        let mut transcript = CliTranscript::default();
+        let run = async {
+            let mut reader = BufReader::new(stdout);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                let n = reader
+                    .read_until(b'\n', &mut buf)
+                    .await
+                    .map_err(|e| AiError::Parse(format!("Error reading stdout from '{program}': {e}")))?;
+                if n == 0 {
+                    break;
+                }
+                let line = String::from_utf8_lossy(&buf);
+                if let Some(delta) = transcript.feed(format, &line) {
                     if let Some(ref tx) = delta_tx {
-                        let _ = tx.send(text);
+                        let _ = tx.send(delta);
                     }
                 }
-                Err(err) => {
-                    return Err(AiError::Parse(format!(
-                        "Error reading stdout from '{program}': {err}"
-                    )));
-                }
             }
-        }
-
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| AiError::Parse(format!("Failed waiting for '{program}': {e}")))?;
+            child
+                .wait()
+                .await
+                .map_err(|e| AiError::Parse(format!("Failed waiting for '{program}': {e}")))
+        };
+        let status = match tokio::time::timeout(self.timeout, run).await {
+            Ok(status) => status?,
+            Err(_) => {
+                return Err(AiError::Parse(format!(
+                    "External CLI '{program}' timed out after {}s and was stopped (set cli_timeout_secs to change).",
+                    self.timeout.as_secs()
+                )))
+            }
+        };
+        guard.disarm();
+        transcript.finish();
         let stderr_text = stderr_handle.await.unwrap_or_default();
+        let full_output = transcript.text.trim_end().to_string();
 
-        if !status.success() && full_output.trim().is_empty() {
+        if full_output.is_empty() && (!status.success() || transcript.error.is_some()) {
             return Err(AiError::CliFailed {
                 cli: program,
                 code: status.code().unwrap_or(1),
-                output: if stderr_text.trim().is_empty() {
-                    format!("exited with status {status}")
-                } else {
-                    stderr_text.trim().to_string()
-                },
+                output: transcript
+                    .error
+                    .clone()
+                    .filter(|e| !e.trim().is_empty())
+                    .or_else(|| (!stderr_text.trim().is_empty()).then(|| stderr_text.trim().to_string()))
+                    .unwrap_or_else(|| format!("exited with status {status}")),
             });
         }
 
-        let input_tokens = (prompt.chars().count() / 4) as u32;
-        let output_tokens = (full_output.chars().count() / 4) as u32;
+        let usage = transcript.usage.unwrap_or(TokenUsage {
+            input_tokens: (prompt.chars().count() / 4) as u32,
+            output_tokens: (full_output.chars().count() / 4) as u32,
+        });
 
         Ok(CompletionResponse {
-            content: full_output.trim_end().to_string(),
+            content: full_output,
             tool_calls: Vec::new(),
-            usage: Some(TokenUsage {
-                input_tokens,
-                output_tokens,
-            }),
+            usage: Some(usage),
             stop_reason: Some("end_turn".to_string()),
+            external_tools: transcript.tools,
         })
     }
 }
@@ -364,6 +451,18 @@ mod tests {
         assert!(args.contains(&"exec".to_string()));
         assert!(args.contains(&"--skip-git-repo-check".to_string()));
         assert!(args.contains(&"o3".to_string()));
+        assert!(args.contains(&"--json".to_string()));
+        assert!(args.windows(2).any(|w| w == ["--sandbox", "workspace-write"]));
+        let claude = ExternalCliProvider::new(
+            ProviderKind::ClaudeCli,
+            "claude".into(),
+            "default".into(),
+            PathBuf::from("."),
+        )
+        .with_limits(5, SandboxMode::ReadOnly);
+        let (_, cargs, _) = claude.build_command_and_args("hi").unwrap();
+        assert!(cargs.windows(2).any(|w| w == ["--output-format", "stream-json"]));
+        assert!(cargs.windows(2).any(|w| w == ["--permission-mode", "plan"]));
 
         let agy = ExternalCliProvider::new(
             ProviderKind::AgyCli,
@@ -389,5 +488,39 @@ mod tests {
         assert_eq!(bin, "my-agent");
         assert_eq!(args, vec!["--fast", "--plain"]);
         assert!(stdin);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod process_tests {
+    use super::*;
+    use crate::ai::Message;
+
+    fn request() -> CompletionRequest {
+        CompletionRequest {
+            system_prompt: String::new(),
+            messages: vec![Message::user("hi")],
+            tools: Vec::new(),
+            max_tokens: 64,
+            temperature: 0.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn timeout_kills_the_whole_process_tree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let marker = dir.path().join("child.pid");
+        let script = dir.path().join("slow.sh");
+        std::fs::write(&script, format!("#!/bin/sh\nsleep 30 &\necho $! > {}\nwait\n", marker.display())).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let p = ExternalCliProvider::new(ProviderKind::CustomCli, script.display().to_string(), "default".into(), dir.path().to_path_buf())
+            .with_limits(1, SandboxMode::WorkspaceWrite);
+        let err = p.complete(&request(), None).await.unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let pid: i32 = std::fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+        // SAFETY: signal 0 only checks whether the process exists.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "grandchild {pid} survived");
     }
 }

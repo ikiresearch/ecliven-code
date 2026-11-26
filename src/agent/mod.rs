@@ -292,6 +292,19 @@ impl AgentEngine {
                 session.add_usage(usage);
             }
 
+            for t in &response.external_tools {
+                let tool_name = format!("external:{}", t.name);
+                let _ = event_tx.send(AgentEvent::ToolStarted {
+                    tool_name: tool_name.clone(),
+                    summary: t.input.clone(),
+                });
+                let output = if t.ok {
+                    ToolOutput::ok(t.output.clone())
+                } else {
+                    ToolOutput::err(t.output.clone())
+                };
+                let _ = event_tx.send(AgentEvent::ToolCompleted { tool_name, output });
+            }
             session.push_assistant(response.content.clone(), response.tool_calls.clone());
 
             let _ = event_tx.send(AgentEvent::AssistantFinished {
@@ -330,15 +343,31 @@ impl AgentEngine {
                     }
                 };
 
-                if tool
-                    .risk_level()
-                    .requires_approval(self.options.approval_mode)
-                {
+                let decision = crate::tools::policy::evaluate(
+                    &call.name,
+                    tool.risk_level(),
+                    &self.tool_ctx,
+                    self.options.approval_mode,
+                );
+                if let crate::tools::policy::Decision::Deny(reason) = &decision {
+                    let msg = format!("Blocked by security policy: {reason}");
+                    session.push_tool_result(&call.id, &call.name, msg.clone());
+                    let _ = event_tx.send(AgentEvent::ToolCompleted {
+                        tool_name: call.name,
+                        output: ToolOutput::err(msg),
+                    });
+                    continue;
+                }
+                if let crate::tools::policy::Decision::Ask { note } = decision {
+                    let mut preview = preview.clone();
+                    if let Some(note) = note {
+                        preview.summary = format!("{} [{note}]", preview.summary);
+                    }
                     let (resp_tx, resp_rx) = oneshot::channel();
                     let _ = event_tx.send(AgentEvent::ToolApprovalRequested {
                         call_id: call.id.clone(),
                         tool_name: call.name.clone(),
-                        preview: preview.clone(),
+                        preview,
                         respond_to: resp_tx,
                     });
 
@@ -454,6 +483,7 @@ mod tests {
                         output_tokens: 5,
                     }),
                     stop_reason: Some("tool_use".into()),
+                    external_tools: Vec::new(),
                 },
                 CompletionResponse {
                     content: "The file says: rust rocks".into(),
@@ -463,6 +493,7 @@ mod tests {
                         output_tokens: 8,
                     }),
                     stop_reason: Some("end_turn".into()),
+                    external_tools: Vec::new(),
                 },
             ]),
         });

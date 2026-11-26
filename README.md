@@ -161,6 +161,20 @@ Los modelos se indican como `proveedor/modelo` (por ejemplo `anthropic/test-mode
 - **Model router:** con `[router].enabled = true`, cada turno se clasifica sin llamar a ningun modelo (dificultad `simple`/`standard`/`complex` y especialidad: security, frontend, backend, data, tests, docs, devops). Se usa el modelo de la especialidad si existe; si no, `cheap`, `standard` o `strong` segun la dificultad. El chat muestra que modelo eligio y por que.
 - **Modo ahorro** (`--saver`, `/saver on` o `saver_mode = true`): baja un nivel de modelo (o usa `cheap` si el router esta apagado), limita la respuesta a 2048 tokens, recorta a 4000 caracteres la salida de herramientas que queda en el historial, compacta al 60 % y pide al modelo respuestas cortas y lecturas minimas. En Swarm, los especialistas hacen como maximo 4 iteraciones y usan `cheap` si no hay `[swarm].workers`.
 
+## Politica de seguridad central
+
+Todas las herramientas pasan por la misma politica antes de ejecutarse:
+
+- `read-only` bloquea `write_file`, `edit_file`, `apply_patch` y las herramientas MCP no confiables, no solo `run_command`.
+- Sin sandbox del sistema (Windows): en `workspace-write` cada comando pide aprobacion aunque uses `auto-all`; en `read-only` los comandos se bloquean.
+- Las escrituras resuelven symlinks en todos los directorios existentes, rechazan symlinks colgantes y archivos dentro de `.git`, y se hacen con archivo temporal + rename en un directorio verificado.
+
+## Backends CLI externos
+
+- `cli_timeout_secs` (por defecto 900) limita cada ejecucion; al vencer, o al cancelar el turno, se termina el proceso y todos sus hijos.
+- El modo de sandbox se traslada a los permisos propios del CLI (`--sandbox` en un backend, `--permission-mode` en otro).
+- Con salida JSON se recuperan sus llamadas a herramientas (comandos, cambios de archivos, MCP) y se muestran en la TUI como `external:<herramienta>`.
+
 ## Confianza en el workspace
 
 El `.ecliven.toml` de un repositorio puede incluir ajustes que ejecutan codigo o reducen la seguridad.

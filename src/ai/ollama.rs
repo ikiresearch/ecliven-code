@@ -194,6 +194,7 @@ impl LlmProvider for OllamaProvider {
                 tool_calls,
                 usage,
                 stop_reason,
+                external_tools: Vec::new(),
             });
         }
 
@@ -251,6 +252,7 @@ impl LlmProvider for OllamaProvider {
             tool_calls,
             usage,
             stop_reason,
+            external_tools: Vec::new(),
         })
     }
 }

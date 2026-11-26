@@ -52,6 +52,7 @@ fn reply(content: &str, tool: Option<(&str, serde_json::Value)>) -> CompletionRe
             .unwrap_or_default(),
         usage: None,
         stop_reason: None,
+        external_tools: Vec::new(),
     }
 }
 
