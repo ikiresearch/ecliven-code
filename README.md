@@ -10,7 +10,7 @@ Agente de codigo con IA en terminal construido en Rust.
 - **Herramientas de codigo con sandbox al workspace**:
   - `read_file`, `write_file`, `edit_file` (con preview de diff unificado antes de escribir)
   - `list_dir`, `search_files` (glob), `grep_content` (regex)
-  - `apply_patch` (edita, crea, mueve y borra varios archivos en un solo parche, formato de OpenAI Codex)
+  - `apply_patch` (edita, crea, mueve y borra varios archivos en un solo parche con un formato propio de bloques `*** Begin Patch`)
   - `run_command` (ejecucion de comandos con timeout configurable y sandbox del sistema operativo)
 - **Instrucciones de proyecto (`AGENTS.md`)**: se cargan `~/.config/ecliven-code/AGENTS.md` y un `AGENTS.md` (o `AGENTS.override.md` / `CLAUDE.md`) por carpeta, desde la raiz del repo hasta el workspace (max. 32 KiB)
 - **Sesiones guardadas (JSONL)** en `<data dir>/ecliven-code/sessions/` (o `ECLIVEN_SESSIONS_DIR`): `ecliven sessions`, `ecliven resume [id]`, `--resume <id|last>`, `/sessions`, `/resume`
@@ -135,7 +135,7 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 
 ## Sandbox de comandos
 
-`run_command` corre dentro de un sandbox del sistema operativo (modos de OpenAI Codex):
+`run_command` corre dentro de un sandbox del sistema operativo:
 
 | Modo | Escritura permitida |
 |---|---|

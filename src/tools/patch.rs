@@ -1,4 +1,4 @@
-//! `apply_patch`: multi-file edits in the patch format used by OpenAI Codex
+//! `apply_patch`: multi-file edits in a single patch
 //! (`*** Begin Patch` / `*** Add File` / `*** Update File` / `*** Delete File`).
 
 use std::path::PathBuf;

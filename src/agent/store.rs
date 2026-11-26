@@ -1,5 +1,5 @@
-//! Persistent chat sessions as JSONL files (one record per line), similar to
-//! Codex rollouts: `<data dir>/ecliven-code/sessions/<id>.jsonl`.
+//! Persistent chat sessions as JSONL files (one record per line):
+//! `<data dir>/ecliven-code/sessions/<id>.jsonl`.
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};

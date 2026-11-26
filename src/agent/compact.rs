@@ -1,5 +1,5 @@
 //! Conversation compaction: replaces older history with an LLM-written handoff
-//! summary when the context window fills up (as in OpenAI Codex and MiMo Code).
+//! summary when the context window fills up.
 
 use std::sync::Arc;
 

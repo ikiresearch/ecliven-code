@@ -1,4 +1,4 @@
-//! OS-level sandbox for `run_command`, modelled on OpenAI Codex sandbox modes.
+//! OS-level sandbox for `run_command`.
 //! Linux: Landlock (re-exec of `ecliven __sandbox`). macOS: Seatbelt (`sandbox-exec`).
 //! Other platforms run commands unsandboxed and say so in the output.
 

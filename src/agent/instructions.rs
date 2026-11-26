@@ -1,6 +1,6 @@
-//! Loads project instructions from AGENTS.md files, following the OpenAI Codex
-//! convention: a global file, then one file per directory from the repository
-//! root down to the workspace, with `AGENTS.override.md` taking precedence.
+//! Loads project instructions from AGENTS.md files: a global file, then one
+//! file per directory from the repository root down to the workspace, with
+//! `AGENTS.override.md` taking precedence.
 
 use std::path::{Path, PathBuf};
 
