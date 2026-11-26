@@ -287,6 +287,7 @@ impl SwarmEngine {
                     AgentEvent::Error(err) => {
                         let _ = forward_tx.send(SwarmEvent::Error(err));
                     }
+                    AgentEvent::Notice(_) => {}
                     AgentEvent::TurnComplete => break,
                 }
             }
@@ -526,16 +527,23 @@ mod tests {
             delta_tx: Option<mpsc::UnboundedSender<String>>,
         ) -> Result<CompletionResponse, AiError> {
             let content = if request.system_prompt.contains("Defense Mode")
-                && request.system_prompt.contains("Defensive Cybersecurity Lead")
+                && request
+                    .system_prompt
+                    .contains("Defensive Cybersecurity Lead")
             {
                 "Defense Lead prioritized vulnerability report.".to_string()
             } else if request.system_prompt.contains("Threat Model")
-                && request.system_prompt.contains("Defensive Security Architect")
+                && request
+                    .system_prompt
+                    .contains("Defensive Security Architect")
             {
                 "STRIDE Threat Model & Hardening roadmap.".to_string()
             } else if request.system_prompt.contains("Surface Mapper") {
                 "Mapped entrypoints in scope.".to_string()
-            } else if request.system_prompt.contains("Application Security Auditor") {
+            } else if request
+                .system_prompt
+                .contains("Application Security Auditor")
+            {
                 "Found 1 HIGH path validation flaw.".to_string()
             } else if request.system_prompt.contains("Remediation & Patch") {
                 "Drafted defensive path canonicalization patch.".to_string()

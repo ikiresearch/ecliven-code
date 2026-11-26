@@ -135,7 +135,10 @@ async fn edit_file_requires_approval_in_ask_mode_and_applies_when_approved() {
     let session = handle.await.unwrap();
     assert!(saw_approval_with_diff);
     assert!(std::fs::read_to_string(&target).unwrap().contains("v2"));
-    assert_eq!(session.messages().last().unwrap().content, "Updated app.rs to v2.");
+    assert_eq!(
+        session.messages().last().unwrap().content,
+        "Updated app.rs to v2."
+    );
 }
 
 #[tokio::test]
@@ -181,7 +184,9 @@ async fn denied_file_write_does_not_modify_disk() {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(async move {
         let mut session = Session::new();
-        engine.run_turn(&mut session, "Overwrite secret.txt".into(), tx).await;
+        engine
+            .run_turn(&mut session, "Overwrite secret.txt".into(), tx)
+            .await;
     });
 
     while let Some(ev) = rx.recv().await {
@@ -322,9 +327,15 @@ impl LlmProvider for DomainMockProvider {
     ) -> Result<CompletionResponse, AiError> {
         let content: String = if request.system_prompt.contains("Master Combiner Agent") {
             "CHIEF combined the clean API from CLEAN, zero-copy buffer from PERF, and edge-case tests from ROBUST.".into()
-        } else if request.system_prompt.contains("Clean Architecture Specialist") {
+        } else if request
+            .system_prompt
+            .contains("Clean Architecture Specialist")
+        {
             "CLEAN candidate implementation.".into()
-        } else if request.system_prompt.contains("Performance & Systems Specialist") {
+        } else if request
+            .system_prompt
+            .contains("Performance & Systems Specialist")
+        {
             "PERF candidate implementation.".into()
         } else {
             "ROBUST candidate implementation with tests.".into()
@@ -406,10 +417,7 @@ async fn onboarding_requires_terms_telemetry_choice_and_workspace_folder() {
     );
 
     // Step 1: Terms
-    assert_eq!(
-        app.onboarding.as_ref().unwrap().step,
-        OnboardingStep::Terms
-    );
+    assert_eq!(app.onboarding.as_ref().unwrap().step, OnboardingStep::Terms);
     app.onboarding_confirm();
     assert!(app.prefs.terms_accepted);
 
@@ -460,4 +468,108 @@ async fn onboarding_requires_terms_telemetry_choice_and_workspace_folder() {
     app.model_picker_select();
     assert!(app.model_picker.is_none());
     assert!(app.config.active_settings().model.contains("opus"));
+}
+
+fn auto_all_engine(provider: Arc<ScriptedProvider>, tmp: &TempDir) -> AgentEngine {
+    AgentEngine::new(
+        provider,
+        Arc::new(ToolRegistry::default_registry()),
+        ToolContext::new(tmp.path().to_path_buf(), 10),
+        AgentOptions {
+            max_tokens: 1024,
+            temperature: 0.0,
+            max_tool_iterations: 5,
+            approval_mode: ApprovalMode::AutoAll,
+        },
+    )
+}
+
+async fn drain(rx: &mut mpsc::UnboundedReceiver<AgentEvent>) -> Vec<String> {
+    let mut notices = Vec::new();
+    while let Some(ev) = rx.recv().await {
+        match ev {
+            AgentEvent::Notice(n) => notices.push(n),
+            AgentEvent::TurnComplete => break,
+            _ => {}
+        }
+    }
+    notices
+}
+
+#[tokio::test]
+async fn apply_patch_turn_creates_checkpoint_that_undo_restores() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("lib.rs"), "pub fn v() -> u8 {\n    1\n}\n").unwrap();
+
+    let patch = "*** Begin Patch\n*** Update File: lib.rs\n-    1\n+    2\n*** Add File: notes.md\n+hello\n*** End Patch";
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        CompletionResponse {
+            content: String::new(),
+            tool_calls: vec![ToolCall {
+                id: "p1".into(),
+                name: "apply_patch".into(),
+                arguments: json!({ "patch": patch }),
+            }],
+            usage: None,
+            stop_reason: Some("tool_use".into()),
+        },
+        CompletionResponse {
+            content: "Done.".into(),
+            ..CompletionResponse::default()
+        },
+    ]));
+    let engine = auto_all_engine(provider, &tmp);
+    let mut session = Session::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    engine.run_turn(&mut session, "bump version".into(), tx).await;
+    drain(&mut rx).await;
+
+    assert!(std::fs::read_to_string(tmp.path().join("lib.rs")).unwrap().contains("2"));
+    assert!(tmp.path().join("notes.md").exists());
+
+    let cp = session.pop_checkpoint().expect("checkpoint recorded");
+    assert_eq!(cp.label, "bump version");
+    cp.restore().unwrap();
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("lib.rs")).unwrap(),
+        "pub fn v() -> u8 {\n    1\n}\n"
+    );
+    assert!(!tmp.path().join("notes.md").exists());
+    assert!(session.pop_checkpoint().is_none());
+}
+
+#[tokio::test]
+async fn engine_compacts_automatically_when_context_is_nearly_full() {
+    let tmp = TempDir::new().unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        CompletionResponse {
+            content: "Summary: user is refactoring main.rs.".into(),
+            ..CompletionResponse::default()
+        },
+        CompletionResponse {
+            content: "Continuing.".into(),
+            ..CompletionResponse::default()
+        },
+    ]));
+    let engine = auto_all_engine(provider, &tmp).with_compaction(2_000, 50);
+    let mut session = Session::new();
+    session.push_user("refactor main.rs");
+    session.push_assistant("x".repeat(8_000), vec![]);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    engine.run_turn(&mut session, "keep going".into(), tx).await;
+    let notices = drain(&mut rx).await;
+
+    assert!(notices.iter().any(|n| n.contains("compacted")), "{notices:?}");
+    assert_eq!(session.len(), 2);
+    assert!(session.messages()[0].content.contains("Summary: user is refactoring"));
+    assert!(session.messages()[0].content.ends_with("keep going"));
+    assert_eq!(session.messages()[1].content, "Continuing.");
+}
+
+#[test]
+fn default_registry_exposes_apply_patch() {
+    assert!(ToolRegistry::default_registry()
+        .names()
+        .contains(&"apply_patch".to_string()));
 }

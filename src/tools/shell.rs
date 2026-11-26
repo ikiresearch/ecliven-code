@@ -2,7 +2,6 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::process::Command;
 
 use crate::tools::{Tool, ToolContext, ToolError, ToolOutput, ToolPreview, ToolRisk};
 
@@ -12,11 +11,11 @@ pub struct RunCommandTool;
 
 #[async_trait]
 impl Tool for RunCommandTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "run_command"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Run a shell command in the workspace root (e.g. cargo test, git status). Captures stdout, stderr, and exit code."
     }
 
@@ -51,17 +50,9 @@ impl Tool for RunCommandTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidArgs("Missing required string 'command'".into()))?;
 
-        let mut command = if cfg!(windows) {
-            let mut c = Command::new("cmd");
-            c.args(["/C", cmd_str]);
-            c
-        } else {
-            let mut c = Command::new("sh");
-            c.args(["-c", cmd_str]);
-            c
-        };
-
-        command.current_dir(&ctx.workspace_root);
+        let (mut command, sandbox_note) =
+            crate::tools::sandbox::build_command(&ctx.sandbox, &ctx.workspace_root, cmd_str);
+        command.current_dir(&ctx.workspace_root).kill_on_drop(true);
 
         let timeout_dur = Duration::from_secs(ctx.shell_timeout_secs);
         let output = tokio::time::timeout(timeout_dur, command.output())
@@ -78,6 +69,10 @@ impl Tool for RunCommandTool {
         let code = output.status.code().unwrap_or(-1);
 
         let mut combined = format!("Exit code: {code}\n");
+        if let Some(note) = sandbox_note {
+            combined.push_str(&note);
+            combined.push('\n');
+        }
         if !stdout.trim().is_empty() {
             combined.push_str("\n--- stdout ---\n");
             combined.push_str(&stdout);

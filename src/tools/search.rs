@@ -21,11 +21,11 @@ pub struct SearchFilesTool;
 
 #[async_trait]
 impl Tool for SearchFilesTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "search_files"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Find files in the workspace matching a glob pattern (e.g. '**/*.rs', 'src/*.toml')."
     }
 
@@ -92,11 +92,11 @@ pub struct GrepContentTool;
 
 #[async_trait]
 impl Tool for GrepContentTool {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "grep_content"
     }
 
-    fn description(&self) -> &'static str {
+    fn description(&self) -> &str {
         "Search text/regex across workspace files and return matching file:line:content lines."
     }
 
@@ -189,7 +189,11 @@ mod tests {
     async fn search_and_grep_find_workspace_matches() {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
-        std::fs::write(tmp.path().join("src/lib.rs"), "pub fn answer() -> u32 { 42 }\n").unwrap();
+        std::fs::write(
+            tmp.path().join("src/lib.rs"),
+            "pub fn answer() -> u32 { 42 }\n",
+        )
+        .unwrap();
         std::fs::write(tmp.path().join("README.md"), "# Demo\n").unwrap();
 
         let ctx = ToolContext::new(tmp.path().to_path_buf(), 10);

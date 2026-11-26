@@ -6,17 +6,25 @@ use clap::Parser;
 use tokio::sync::mpsc;
 
 use ecliven_code::agent::session::Session;
+use ecliven_code::agent::store::{self, SessionStore};
 use ecliven_code::agent::{AgentEngine, AgentEvent, AgentOptions};
 use ecliven_code::ai::registry::build_provider;
 use ecliven_code::cli::{Cli, Commands};
 use ecliven_code::config::AppConfig;
+use ecliven_code::mcp;
 use ecliven_code::swarm::domain::SwarmDomain;
 use ecliven_code::swarm::{SwarmEngine, SwarmEvent, SwarmOptions};
-use ecliven_code::tools::{ToolContext, ToolRegistry};
+use ecliven_code::tools::ToolRegistry;
 use ecliven_code::updater::{self, UpdateStatus};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let raw_args: Vec<String> = std::env::args().collect();
+    if raw_args.get(1).map(String::as_str) == Some(ecliven_code::tools::sandbox::SANDBOX_SUBCOMMAND)
+    {
+        ecliven_code::tools::sandbox::sandbox_main(&raw_args[2..]);
+    }
+
     updater::cleanup_stale_backup();
 
     let cli = Cli::parse();
@@ -54,9 +62,51 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        None => {}
+        Some(Commands::Sessions { all }) => {
+            let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
+            let Some(store) = SessionStore::default_store() else {
+                anyhow::bail!("No data directory available for sessions");
+            };
+            let filter = (!all).then_some(config.workspace_dir.as_path());
+            let sessions = store.list(filter);
+            if sessions.is_empty() {
+                println!(
+                    "No saved sessions{}.",
+                    if all { "" } else { " for this workspace" }
+                );
+            }
+            for s in sessions {
+                println!(
+                    "{}  {:>9}  {:>3} msgs  {}{}",
+                    s.meta.id,
+                    store::format_age(s.updated_at),
+                    s.message_count,
+                    s.meta.title,
+                    if all {
+                        format!("  ({})", s.meta.workspace.display())
+                    } else {
+                        String::new()
+                    }
+                );
+            }
+            return Ok(());
+        }
+        Some(Commands::Mcp) => {
+            let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
+            let conns = mcp::connect_all(&config.mcp_servers).await;
+            println!("{}", conns.summary());
+            for tool in &conns.tools {
+                println!("    {}", tool.name());
+            }
+            return Ok(());
+        }
+        Some(Commands::Resume { .. }) | None => {}
     }
 
+    let resume = match &cli.command {
+        Some(Commands::Resume { id }) => Some(id.clone().unwrap_or_else(|| "last".into())),
+        _ => cli.resume.clone(),
+    };
     let config = AppConfig::load(workspace_dir, &cli.to_overrides())?;
     let initial_swarm: Option<SwarmDomain> = cli.swarm.map(Into::into);
     let initial_scope = cli.scope;
@@ -66,7 +116,7 @@ async fn main() -> Result<()> {
         let res = if let Some(domain) = initial_swarm {
             run_headless_swarm(config, domain, initial_scope, prompt).await
         } else {
-            run_headless(config, prompt).await
+            run_headless(config, prompt, resume).await
         };
         if let Ok(Ok(Ok(UpdateStatus::Available { current, latest }))) =
             tokio::time::timeout(std::time::Duration::from_millis(500), update_task).await
@@ -78,25 +128,53 @@ async fn main() -> Result<()> {
         }
         res
     } else {
-        ecliven_code::tui::run_tui(config, initial_swarm, initial_scope, cli.setup).await
+        ecliven_code::tui::run_tui(config, initial_swarm, initial_scope, cli.setup, resume).await
     }
 }
 
-async fn run_headless(config: AppConfig, prompt: String) -> Result<()> {
+async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>) -> Result<()> {
     let provider = build_provider(&config)?;
+    let conns = mcp::connect_all(&config.mcp_servers).await;
+    for err in &conns.errors {
+        eprintln!("[mcp] {err}");
+    }
     let engine = AgentEngine::new(
         provider,
-        Arc::new(ToolRegistry::default_registry()),
-        ToolContext::new(config.workspace_dir.clone(), config.shell_timeout_secs),
+        Arc::new(ToolRegistry::with_extra_tools(&conns.tools)),
+        config.tool_context(),
         AgentOptions {
             max_tokens: config.max_tokens,
             temperature: config.temperature,
             max_tool_iterations: config.max_tool_iterations,
             approval_mode: config.approval_mode,
         },
-    );
+    )
+    .with_compaction(config.context_window_tokens(), config.auto_compact_percent);
 
     let mut session = Session::new();
+    if let Some(store) = SessionStore::default_store() {
+        match resume {
+            Some(query) => {
+                let found = store
+                    .find(&query, &config.workspace_dir)
+                    .map_err(anyhow::Error::msg)?;
+                let (_, messages) = store::load_session(&found.path).map_err(anyhow::Error::msg)?;
+                session = Session::from_messages(messages);
+                session.attach_recorder(store.reopen(&found));
+                eprintln!("[ecliven] Resumed session {}", found.meta.id);
+            }
+            None => {
+                if let Ok(rec) = store.create(
+                    &config.workspace_dir,
+                    config.active_provider.as_str(),
+                    &config.active_settings().model,
+                ) {
+                    session.attach_recorder(rec);
+                }
+            }
+        }
+    }
+    let session_id = session.recorder().map(|r| r.id().to_string());
     let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
 
     let handle = tokio::spawn(async move {
@@ -132,11 +210,17 @@ async fn run_headless(config: AppConfig, prompt: String) -> Result<()> {
             AgentEvent::Error(err) => {
                 eprintln!("Error: {err}");
             }
+            AgentEvent::Notice(msg) => {
+                eprintln!("[ecliven] {msg}");
+            }
             AgentEvent::TurnComplete => break,
         }
     }
 
     let _ = handle.await;
+    if let Some(id) = session_id {
+        eprintln!("[ecliven] Session {id} saved. Continue with: ecliven resume {id}");
+    }
     Ok(())
 }
 
@@ -151,7 +235,7 @@ async fn run_headless_swarm(
         domain,
         provider,
         Arc::new(ToolRegistry::default_registry()),
-        ToolContext::new(config.workspace_dir.clone(), config.shell_timeout_secs),
+        config.tool_context(),
         SwarmOptions {
             max_tokens: config.max_tokens,
             temperature: config.temperature,

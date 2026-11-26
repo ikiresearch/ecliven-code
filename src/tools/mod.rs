@@ -1,5 +1,7 @@
 pub mod diff;
 pub mod fs;
+pub mod patch;
+pub mod sandbox;
 pub mod search;
 pub mod shell;
 
@@ -55,6 +57,7 @@ impl ToolRisk {
 pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub shell_timeout_secs: u64,
+    pub sandbox: sandbox::SandboxPolicy,
 }
 
 impl ToolContext {
@@ -65,7 +68,13 @@ impl ToolContext {
         Self {
             workspace_root: canonical,
             shell_timeout_secs,
+            sandbox: sandbox::SandboxPolicy::default(),
         }
+    }
+
+    pub fn with_sandbox(mut self, sandbox: sandbox::SandboxPolicy) -> Self {
+        self.sandbox = sandbox;
+        self
     }
 
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
@@ -152,10 +161,15 @@ impl ToolOutput {
 
 #[async_trait]
 pub trait Tool: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn description(&self) -> &'static str;
+    fn name(&self) -> &str;
+    fn description(&self) -> &str;
     fn input_schema(&self) -> Value;
     fn risk_level(&self) -> ToolRisk;
+
+    /// Workspace files this call may create, modify or delete; used for checkpoints.
+    fn touched_paths(&self, _ctx: &ToolContext, _args: &Value) -> Vec<PathBuf> {
+        Vec::new()
+    }
 
     fn preview(&self, _ctx: &ToolContext, args: &Value) -> Result<ToolPreview, ToolError> {
         Ok(ToolPreview {
@@ -177,8 +191,8 @@ pub fn compact_args(args: &Value) -> String {
 }
 
 pub struct ToolRegistry {
-    tools: HashMap<&'static str, Arc<dyn Tool>>,
-    order: Vec<&'static str>,
+    tools: HashMap<String, Arc<dyn Tool>>,
+    order: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -190,9 +204,9 @@ impl ToolRegistry {
     }
 
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
-        let name = tool.name();
-        if !self.tools.contains_key(name) {
-            self.order.push(name);
+        let name = tool.name().to_string();
+        if !self.tools.contains_key(&name) {
+            self.order.push(name.clone());
         }
         self.tools.insert(name, tool);
     }
@@ -202,6 +216,7 @@ impl ToolRegistry {
         reg.register(Arc::new(fs::ReadFileTool));
         reg.register(Arc::new(fs::WriteFileTool));
         reg.register(Arc::new(fs::EditFileTool));
+        reg.register(Arc::new(patch::ApplyPatchTool));
         reg.register(Arc::new(fs::ListDirTool));
         reg.register(Arc::new(search::SearchFilesTool));
         reg.register(Arc::new(search::GrepContentTool));
@@ -220,6 +235,19 @@ impl ToolRegistry {
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
+    }
+
+    /// Default tools plus extra (e.g. MCP) tools.
+    pub fn with_extra_tools(extra: &[Arc<dyn Tool>]) -> Self {
+        let mut reg = Self::default_registry();
+        for tool in extra {
+            reg.register(Arc::clone(tool));
+        }
+        reg
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.order.clone()
     }
 
     pub fn specs(&self) -> Vec<ToolSpec> {
