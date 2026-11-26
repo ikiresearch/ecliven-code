@@ -292,6 +292,19 @@ impl AgentEngine {
                 session.add_usage(usage);
             }
 
+            for t in &response.external_tools {
+                let tool_name = format!("external:{}", t.name);
+                let _ = event_tx.send(AgentEvent::ToolStarted {
+                    tool_name: tool_name.clone(),
+                    summary: t.input.clone(),
+                });
+                let output = if t.ok {
+                    ToolOutput::ok(t.output.clone())
+                } else {
+                    ToolOutput::err(t.output.clone())
+                };
+                let _ = event_tx.send(AgentEvent::ToolCompleted { tool_name, output });
+            }
             session.push_assistant(response.content.clone(), response.tool_calls.clone());
 
             let _ = event_tx.send(AgentEvent::AssistantFinished {
@@ -470,6 +483,7 @@ mod tests {
                         output_tokens: 5,
                     }),
                     stop_reason: Some("tool_use".into()),
+                    external_tools: Vec::new(),
                 },
                 CompletionResponse {
                     content: "The file says: rust rocks".into(),
@@ -479,6 +493,7 @@ mod tests {
                         output_tokens: 8,
                     }),
                     stop_reason: Some("end_turn".into()),
+                    external_tools: Vec::new(),
                 },
             ]),
         });

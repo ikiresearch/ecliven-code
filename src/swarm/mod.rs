@@ -599,6 +599,7 @@ mod tests {
                     output_tokens: 5,
                 }),
                 stop_reason: Some("end_turn".into()),
+                external_tools: Vec::new(),
             })
         }
     }

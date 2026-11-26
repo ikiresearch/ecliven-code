@@ -209,6 +209,8 @@ pub struct AppConfig {
     pub temperature: f32,
     pub max_tool_iterations: usize,
     pub shell_timeout_secs: u64,
+    /// Maximum run time of an external CLI backend per request.
+    pub cli_timeout_secs: u64,
     pub approval_mode: ApprovalMode,
     pub sandbox_mode: SandboxMode,
     pub sandbox_network: bool,
@@ -301,6 +303,7 @@ struct FileConfig {
     temperature: Option<f32>,
     max_tool_iterations: Option<usize>,
     shell_timeout_secs: Option<u64>,
+    cli_timeout_secs: Option<u64>,
     approval_mode: Option<ApprovalMode>,
     providers: Option<FileProvidersConfig>,
 }
@@ -457,6 +460,7 @@ impl AppConfig {
             temperature: DEFAULT_TEMPERATURE,
             max_tool_iterations: DEFAULT_MAX_TOOL_ITERATIONS,
             shell_timeout_secs: DEFAULT_SHELL_TIMEOUT_SECS,
+            cli_timeout_secs: crate::ai::cli_backend::DEFAULT_CLI_TIMEOUT_SECS,
             approval_mode: ApprovalMode::Ask,
             sandbox_mode: SandboxMode::WorkspaceWrite,
             sandbox_network: true,
@@ -674,6 +678,9 @@ impl AppConfig {
         }
         if let Some(max_iter) = parsed.max_tool_iterations {
             self.max_tool_iterations = max_iter;
+        }
+        if let Some(timeout) = parsed.cli_timeout_secs {
+            self.cli_timeout_secs = timeout;
         }
         if let Some(timeout) = parsed.shell_timeout_secs {
             self.shell_timeout_secs = timeout;

@@ -78,6 +78,7 @@ async fn edit_file_requires_approval_in_ask_mode_and_applies_when_approved() {
                 output_tokens: 10,
             }),
             stop_reason: Some("tool_use".into()),
+            external_tools: Vec::new(),
         },
         CompletionResponse {
             content: "Updated app.rs to v2.".into(),
@@ -87,6 +88,7 @@ async fn edit_file_requires_approval_in_ask_mode_and_applies_when_approved() {
                 output_tokens: 8,
             }),
             stop_reason: Some("end_turn".into()),
+            external_tools: Vec::new(),
         },
     ]));
 
@@ -160,12 +162,14 @@ async fn denied_file_write_does_not_modify_disk() {
             }],
             usage: None,
             stop_reason: Some("tool_use".into()),
+            external_tools: Vec::new(),
         },
         CompletionResponse {
             content: "Understood, I did not touch secret.txt.".into(),
             tool_calls: Vec::new(),
             usage: None,
             stop_reason: Some("end_turn".into()),
+            external_tools: Vec::new(),
         },
     ]));
 
@@ -353,6 +357,7 @@ impl LlmProvider for DomainMockProvider {
                 output_tokens: 6,
             }),
             stop_reason: Some("end_turn".into()),
+            external_tools: Vec::new(),
         })
     }
 }
@@ -512,6 +517,7 @@ async fn apply_patch_turn_creates_checkpoint_that_undo_restores() {
             }],
             usage: None,
             stop_reason: Some("tool_use".into()),
+            external_tools: Vec::new(),
         },
         CompletionResponse {
             content: "Done.".into(),
