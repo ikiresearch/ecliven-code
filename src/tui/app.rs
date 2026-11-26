@@ -367,6 +367,61 @@ impl App {
         });
     }
 
+    pub fn announce_workspace_trust(&mut self) {
+        if self.config.workspace_trust.withheld() {
+            let msg = format!(
+                "{}\nUse /trust to enable them or /trust deny to keep them off.",
+                self.config.workspace_trust.describe()
+            );
+            self.push_system(msg);
+        }
+    }
+
+    fn handle_trust_command(&mut self, arg: Option<&str>, ui_tx: mpsc::UnboundedSender<UiEvent>) {
+        use crate::config::trust::{TrustStatus, TrustStore};
+        let trust = self.config.workspace_trust.clone();
+        let result = match arg {
+            Some("status") => return self.push_system(trust.describe()),
+            Some("revoke") => {
+                let mut store = TrustStore::load_default();
+                store.revoke(&trust.key);
+                store.save().map(|_| "Trust decision removed; restart to be asked again.".to_string())
+            }
+            Some("deny") => TrustStore::decide(&trust, false).map(|_| {
+                self.config.workspace_trust.status = TrustStatus::Denied;
+                "Workspace denied: executable project settings stay disabled.".to_string()
+            }),
+            None | Some("yes") => {
+                if self.is_busy {
+                    return self.push_error("Wait for the current turn to finish.");
+                }
+                TrustStore::decide(&trust, true).and_then(|_| {
+                    let mut cfg = self.config.reload().map_err(|e| e.to_string())?;
+                    let model = self.config.active_settings().model.clone();
+                    cfg.set_provider(self.config.active_provider);
+                    cfg.set_model(model);
+                    self.config = cfg;
+                    Ok(format!(
+                        "Workspace trusted. Approval: {:?}, sandbox: {:?}, MCP servers: {}.",
+                        self.config.approval_mode,
+                        self.config.sandbox_mode,
+                        self.config.mcp_servers.len()
+                    ))
+                })
+            }
+            Some(_) => return self.push_error("Usage: /trust [yes|deny|revoke|status]"),
+        };
+        match result {
+            Ok(msg) => {
+                self.push_system(msg);
+                if matches!(arg, None | Some("yes")) {
+                    self.start_mcp(ui_tx);
+                }
+            }
+            Err(e) => self.push_error(format!("Could not save trust decision: {e}")),
+        }
+    }
+
     fn push_system(&mut self, msg: impl Into<String>) {
         let st = self.active_state_mut();
         st.entries.push(ChatEntry::System(msg.into()));
@@ -1287,6 +1342,10 @@ impl App {
                 self.config.effective_compact_percent(),
             )
             .with_saver_mode(self.config.saver_mode);
+            let engine = match self.config.brief_options() {
+                Some(opts) => engine.with_knowledge(opts, self.config.knowledge.workflow),
+                None => engine,
+            };
 
             tokio::spawn(async move {
                 let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
@@ -1649,6 +1708,11 @@ impl App {
                      /router [on|off]                                Auto-pick model by difficulty, cost, specialty\n\
                      /saver [on|off]                                 Saver mode: minimize tokens and cost\n\
                      /swarm-models                                   Show models used by Swarm agents\n\
+                     /memory [search <q>|add <text>|forget <id>|confirm <id>|stale]  Project and user memory\n\
+                     /index [rebuild]                                Refresh or rebuild the code index\n\
+                     /tasks | /goal <text> | /goal done              Task history and active goal\n\
+                     /workflow [on|off]                              Guided inspect-plan-verify-remember loop\n\
+                     /trust [yes|deny|revoke|status]                 Enable executable settings of this workspace\n\
                      /status                                         Show session & provider status\n\
                      /clear                                          Clear current tab history\n\
                      /quit                                           Exit Ecliven Code\n\n\
@@ -1928,6 +1992,35 @@ impl App {
             "/compact" => self.compact_active_session(ui_tx),
             "/undo" | "/revert" => self.undo_last_checkpoint().await,
             "/checkpoints" => self.list_checkpoints().await,
+            "/memory" | "/index" | "/tasks" | "/goal" => {
+                let ws = self.config.workspace_dir.clone();
+                let name = cmd.to_string();
+                let rest = raw.trim().strip_prefix(cmd).unwrap_or("").trim().to_string();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::knowledge::commands::run(&ws, &name, &rest)
+                })
+                .await
+                .map_err(|e| e.to_string())
+                .and_then(|r| r);
+                match result {
+                    Ok(msg) => self.push_system(msg),
+                    Err(e) => self.push_error(e),
+                }
+            }
+            "/trust" => self.handle_trust_command(arg1, ui_tx.clone()),
+            "/workflow" => {
+                match arg1 {
+                    Some("on") => self.config.knowledge.workflow = true,
+                    Some("off") => self.config.knowledge.workflow = false,
+                    Some(_) => return self.push_error("Usage: /workflow [on|off]"),
+                    None => {}
+                }
+                let msg = format!(
+                    "Workflow mode {}.",
+                    if self.config.knowledge.workflow { "on" } else { "off" }
+                );
+                self.push_system(msg);
+            }
             "/sessions" | "/history" => self.list_sessions(),
             "/resume" => self.resume_session(arg1.unwrap_or("last")).await,
             "/mcp" => {

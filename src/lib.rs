@@ -2,6 +2,7 @@ pub mod agent;
 pub mod ai;
 pub mod cli;
 pub mod config;
+pub mod knowledge;
 pub mod mcp;
 pub mod swarm;
 pub mod tools;

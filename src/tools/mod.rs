@@ -1,5 +1,6 @@
 pub mod diff;
 pub mod fs;
+pub mod knowledge;
 pub mod patch;
 pub mod sandbox;
 pub mod search;
@@ -58,6 +59,14 @@ pub struct ToolContext {
     pub workspace_root: PathBuf,
     pub shell_timeout_secs: u64,
     pub sandbox: sandbox::SandboxPolicy,
+    pub knowledge: KnowledgeSettings,
+}
+
+/// Knowledge-tool settings carried with each tool call.
+#[derive(Debug, Clone, Default)]
+pub struct KnowledgeSettings {
+    pub saver: bool,
+    pub embedding: Option<crate::knowledge::EmbeddingClient>,
 }
 
 impl ToolContext {
@@ -69,7 +78,13 @@ impl ToolContext {
             workspace_root: canonical,
             shell_timeout_secs,
             sandbox: sandbox::SandboxPolicy::default(),
+            knowledge: KnowledgeSettings::default(),
         }
+    }
+
+    pub fn with_knowledge(mut self, knowledge: KnowledgeSettings) -> Self {
+        self.knowledge = knowledge;
+        self
     }
 
     pub fn with_sandbox(mut self, sandbox: sandbox::SandboxPolicy) -> Self {
@@ -233,11 +248,23 @@ impl ToolRegistry {
         reg.register(Arc::new(search::SearchFilesTool));
         reg.register(Arc::new(search::GrepContentTool));
         reg.register(Arc::new(shell::RunCommandTool));
+        reg.register_knowledge_tools(true);
         reg
+    }
+
+    fn register_knowledge_tools(&mut self, writable: bool) {
+        self.register(Arc::new(knowledge::CodeSearchTool));
+        self.register(Arc::new(knowledge::FindSymbolTool));
+        self.register(Arc::new(knowledge::MemorySearchTool));
+        if writable {
+            self.register(Arc::new(knowledge::MemorySaveTool));
+            self.register(Arc::new(knowledge::UpdatePlanTool));
+        }
     }
 
     pub fn read_only_registry() -> Self {
         let mut reg = Self::new();
+        reg.register_knowledge_tools(false);
         reg.register(Arc::new(fs::ReadFileTool));
         reg.register(Arc::new(fs::ListDirTool));
         reg.register(Arc::new(search::SearchFilesTool));
