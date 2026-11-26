@@ -240,7 +240,7 @@ fn plan_changes(ctx: &ToolContext, patch: &str) -> Result<Vec<FileChange>, ToolE
     for op in parse_patch(patch)? {
         match op {
             PatchOp::Add { path, content } => {
-                let resolved = ctx.resolve_path(&path)?;
+                let resolved = ctx.resolve_write_path(&path)?;
                 let old = std::fs::read_to_string(&resolved).ok();
                 changes.push(FileChange {
                     display: path,
@@ -250,7 +250,7 @@ fn plan_changes(ctx: &ToolContext, patch: &str) -> Result<Vec<FileChange>, ToolE
                 });
             }
             PatchOp::Delete { path } => {
-                let resolved = ctx.resolve_path(&path)?;
+                let resolved = ctx.resolve_write_path(&path)?;
                 let old = std::fs::read_to_string(&resolved)?;
                 changes.push(FileChange {
                     display: path,
@@ -264,12 +264,12 @@ fn plan_changes(ctx: &ToolContext, patch: &str) -> Result<Vec<FileChange>, ToolE
                 move_to,
                 hunks,
             } => {
-                let resolved = ctx.resolve_path(&path)?;
+                let resolved = ctx.resolve_write_path(&path)?;
                 let old = std::fs::read_to_string(&resolved)?;
                 let updated = apply_hunks(&old, &hunks, &path)?;
                 match move_to {
                     Some(dest) => {
-                        let dest_path = ctx.resolve_path(&dest)?;
+                        let dest_path = ctx.resolve_write_path(&dest)?;
                         let dest_old = std::fs::read_to_string(&dest_path).ok();
                         changes.push(FileChange {
                             display: path,
@@ -374,10 +374,7 @@ impl Tool for ApplyPatchTool {
         for change in &changes {
             match &change.new {
                 Some(content) => {
-                    if let Some(parent) = change.path.parent() {
-                        tokio::fs::create_dir_all(parent).await?;
-                    }
-                    tokio::fs::write(&change.path, content).await?;
+                    ctx.write_file_atomic(&change.path, content.as_bytes()).await?;
                     let verb = if change.old.is_some() { "M" } else { "A" };
                     summary.push(format!("{verb} {}", change.display));
                 }

@@ -63,6 +63,7 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn LlmProvider>, AiErro
             settings.base_url.clone(),
             settings.model.clone(),
             config.workspace_dir.clone(),
-        ))),
+        )
+        .with_limits(config.cli_timeout_secs, config.sandbox_mode))),
     }
 }

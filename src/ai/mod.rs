@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod cli_backend;
+pub mod cli_events;
 pub mod models;
 pub mod ollama;
 pub mod openai;
@@ -129,6 +130,16 @@ pub struct CompletionResponse {
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<TokenUsage>,
     pub stop_reason: Option<String>,
+    /// Tools already run by an external CLI backend (informational, not executed again).
+    pub external_tools: Vec<ExternalToolCall>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExternalToolCall {
+    pub name: String,
+    pub input: String,
+    pub output: String,
+    pub ok: bool,
 }
 
 #[async_trait]

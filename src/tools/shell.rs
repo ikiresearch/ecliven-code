@@ -50,6 +50,7 @@ impl Tool for RunCommandTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError::InvalidArgs("Missing required string 'command'".into()))?;
 
+        crate::tools::policy::check_shell(ctx)?;
         let (mut command, sandbox_note) =
             crate::tools::sandbox::build_command(&ctx.sandbox, &ctx.workspace_root, cmd_str);
         command.current_dir(&ctx.workspace_root).kill_on_drop(true);

@@ -410,6 +410,7 @@ dependencies = [
  "futures",
  "globset",
  "landlock",
+ "libc",
  "ratatui",
  "regex",
  "reqwest",

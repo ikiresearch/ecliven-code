@@ -108,7 +108,7 @@ impl Tool for WriteFileTool {
     fn preview(&self, ctx: &ToolContext, args: &Value) -> Result<ToolPreview, ToolError> {
         let raw_path = required_str(args, "path")?;
         let new_content = required_str(args, "content")?;
-        let path = ctx.resolve_path(raw_path)?;
+        let path = ctx.resolve_write_path(raw_path)?;
 
         let old_content = if path.exists() {
             std::fs::read_to_string(&path).unwrap_or_default()
@@ -132,7 +132,7 @@ impl Tool for WriteFileTool {
     async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError> {
         let raw_path = required_str(args, "path")?;
         let new_content = required_str(args, "content")?;
-        let path = ctx.resolve_path(raw_path)?;
+        let path = ctx.resolve_write_path(raw_path)?;
 
         let old_content = if path.exists() {
             tokio::fs::read_to_string(&path).await.unwrap_or_default()
@@ -140,10 +140,7 @@ impl Tool for WriteFileTool {
             String::new()
         };
 
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&path, new_content).await?;
+        ctx.write_file_atomic(&path, new_content.as_bytes()).await?;
 
         let diff = unified_diff(
             &format!("a/{raw_path}"),
@@ -231,11 +228,11 @@ impl Tool for EditFileTool {
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let path = ctx.resolve_path(raw_path)?;
+        let path = ctx.resolve_write_path(raw_path)?;
         let current = tokio::fs::read_to_string(&path).await?;
         let updated = compute_edit(&current, old_str, new_str, replace_all)?;
 
-        tokio::fs::write(&path, &updated).await?;
+        ctx.write_file_atomic(&path, updated.as_bytes()).await?;
 
         let diff = unified_diff(
             &format!("a/{raw_path}"),

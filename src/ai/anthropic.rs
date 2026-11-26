@@ -295,6 +295,7 @@ impl LlmProvider for AnthropicProvider {
             tool_calls,
             usage: Some(usage),
             stop_reason,
+            external_tools: Vec::new(),
         })
     }
 }
@@ -346,6 +347,7 @@ fn parse_non_streaming_response(body: &Value) -> Result<CompletionResponse, AiEr
         tool_calls,
         usage,
         stop_reason,
+        external_tools: Vec::new(),
     })
 }
 

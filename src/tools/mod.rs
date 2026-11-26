@@ -2,6 +2,7 @@ pub mod diff;
 pub mod fs;
 pub mod knowledge;
 pub mod patch;
+pub mod policy;
 pub mod sandbox;
 pub mod search;
 pub mod shell;
@@ -33,6 +34,9 @@ pub enum ToolError {
 
     #[error("Tool '{0}' not found")]
     NotFound(String),
+
+    #[error("Blocked by security policy: {0}")]
+    PolicyDenied(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +96,9 @@ impl ToolContext {
         self
     }
 
+    /// Resolves `raw` inside the workspace. Existing ancestors are canonicalized
+    /// (following symlinks) so a symlinked directory or a dangling symlink cannot
+    /// point a new file outside the workspace.
     pub fn resolve_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
         let requested = Path::new(raw);
         let joined = if requested.is_absolute() {
@@ -105,15 +112,100 @@ impl ToolContext {
             return Err(ToolError::PathOutsideWorkspace(raw.to_string()));
         }
 
-        if normalized.exists() {
-            let canonical = normalized.canonicalize()?;
-            if !canonical.starts_with(&self.workspace_root) {
-                return Err(ToolError::PathOutsideWorkspace(raw.to_string()));
+        let mut existing = normalized.as_path();
+        let mut missing: Vec<&std::ffi::OsStr> = Vec::new();
+        loop {
+            match std::fs::symlink_metadata(existing) {
+                Ok(_) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    missing.push(existing.file_name().ok_or_else(|| {
+                        ToolError::PathOutsideWorkspace(raw.to_string())
+                    })?);
+                    existing = existing
+                        .parent()
+                        .ok_or_else(|| ToolError::PathOutsideWorkspace(raw.to_string()))?;
+                }
+                Err(e) => return Err(e.into()),
             }
-            return Ok(canonical);
         }
+        let mut resolved = existing.canonicalize().map_err(|_| {
+            ToolError::PolicyDenied(format!("'{raw}' goes through a symlink whose target does not exist"))
+        })?;
+        if !resolved.starts_with(&self.workspace_root) {
+            return Err(ToolError::PathOutsideWorkspace(raw.to_string()));
+        }
+        for part in missing.iter().rev() {
+            resolved.push(part);
+        }
+        Ok(resolved)
+    }
 
-        Ok(normalized)
+    /// Like [`resolve_path`](Self::resolve_path), for tools that modify files:
+    /// applies the central policy and protects `.git` internals (hooks run code).
+    pub fn resolve_write_path(&self, raw: &str) -> Result<PathBuf, ToolError> {
+        policy::check_file_write(self)?;
+        let path = self.resolve_path(raw)?;
+        let in_git = path
+            .strip_prefix(&self.workspace_root)
+            .map(|rel| rel.components().any(|c| c.as_os_str() == ".git"))
+            .unwrap_or(false);
+        if in_git {
+            return Err(ToolError::PolicyDenied(format!(
+                "'{raw}' is inside .git; git internals (hooks, config) cannot be edited by tools"
+            )));
+        }
+        Ok(path)
+    }
+
+    /// Writes through a temp file + rename in a re-verified parent directory, so
+    /// the final component is never followed if it became a symlink meanwhile.
+    pub async fn write_file_atomic(&self, path: &Path, contents: &[u8]) -> Result<(), ToolError> {
+        use tokio::io::AsyncWriteExt;
+        let outside = || ToolError::PathOutsideWorkspace(path.display().to_string());
+        let parent = path.parent().ok_or_else(outside)?;
+        let name = path.file_name().ok_or_else(outside)?;
+        tokio::fs::create_dir_all(parent).await?;
+        let parent = tokio::fs::canonicalize(parent).await?;
+        if !parent.starts_with(&self.workspace_root) {
+            return Err(outside());
+        }
+        let target = parent.join(name);
+        let previous = tokio::fs::symlink_metadata(&target).await.ok();
+        if previous.as_ref().is_some_and(|m| m.file_type().is_symlink()) {
+            return Err(ToolError::PolicyDenied(format!(
+                "refusing to write through symlink {}",
+                target.display()
+            )));
+        }
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tmp = parent.join(format!(
+            ".{}.ecliven-{}-{nanos}.tmp",
+            name.to_string_lossy(),
+            std::process::id()
+        ));
+        let written = async {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .await?;
+            file.write_all(contents).await?;
+            file.flush().await?;
+            drop(file);
+            if let Some(meta) = &previous {
+                tokio::fs::set_permissions(&tmp, meta.permissions()).await?;
+            }
+            tokio::fs::rename(&tmp, &target).await
+        }
+        .await;
+        if let Err(e) = written {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
+        Ok(())
     }
 }
 
