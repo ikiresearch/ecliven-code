@@ -30,6 +30,8 @@ pub enum WorkspaceSection {
     Chat,
     SwarmCode,
     SwarmSecurity,
+    /// Competitive, collaborative or Red Eclipse swarm (see `App::team_domain`).
+    SwarmTeam,
 }
 
 impl WorkspaceSection {
@@ -37,7 +39,8 @@ impl WorkspaceSection {
         match self {
             Self::Chat => Self::SwarmCode,
             Self::SwarmCode => Self::SwarmSecurity,
-            Self::SwarmSecurity => Self::Chat,
+            Self::SwarmSecurity => Self::SwarmTeam,
+            Self::SwarmTeam => Self::Chat,
         }
     }
 
@@ -45,6 +48,9 @@ impl WorkspaceSection {
         match domain {
             SwarmDomain::Code => Self::SwarmCode,
             SwarmDomain::Security(_) => Self::SwarmSecurity,
+            SwarmDomain::Competitive | SwarmDomain::Collaborative | SwarmDomain::RedEclipse => {
+                Self::SwarmTeam
+            }
         }
     }
 
@@ -53,6 +59,7 @@ impl WorkspaceSection {
             Self::Chat => "Chat",
             Self::SwarmCode => "Swarm: Code",
             Self::SwarmSecurity => "Swarm: Security",
+            Self::SwarmTeam => "Swarm: Team",
         }
     }
 }
@@ -227,9 +234,11 @@ pub struct App {
     pub onboarding: Option<OnboardingState>,
     pub active_section: WorkspaceSection,
     pub security_sub_mode: SecuritySubMode,
+    pub team_domain: SwarmDomain,
     pub chat_state: SectionState,
     pub swarm_code_state: SectionState,
     pub swarm_security_state: SectionState,
+    pub swarm_team_state: SectionState,
     pub input: String,
     pub cursor_pos: usize,
     pub input_history: Vec<String>,
@@ -288,6 +297,14 @@ impl App {
             None
         };
         let sec_scope = if active_section == WorkspaceSection::SwarmSecurity {
+            initial_scope.clone()
+        } else {
+            None
+        };
+        let team_domain = initial_swarm
+            .filter(SwarmDomain::is_team_mode)
+            .unwrap_or(SwarmDomain::Competitive);
+        let team_scope = if active_section == WorkspaceSection::SwarmTeam {
             initial_scope
         } else {
             None
@@ -316,12 +333,14 @@ impl App {
             onboarding,
             active_section,
             security_sub_mode,
+            team_domain,
             chat_state: SectionState::new_chat(),
             swarm_code_state: SectionState::new_swarm(SwarmDomain::Code, code_scope),
             swarm_security_state: SectionState::new_swarm(
                 SwarmDomain::Security(security_sub_mode),
                 sec_scope,
             ),
+            swarm_team_state: SectionState::new_swarm(team_domain, team_scope),
             input: String::new(),
             cursor_pos: 0,
             input_history: Vec::new(),
@@ -677,6 +696,7 @@ impl App {
             WorkspaceSection::Chat => None,
             WorkspaceSection::SwarmCode => Some(SwarmDomain::Code),
             WorkspaceSection::SwarmSecurity => Some(SwarmDomain::Security(self.security_sub_mode)),
+            WorkspaceSection::SwarmTeam => Some(self.team_domain),
         }
     }
 
@@ -951,6 +971,7 @@ impl App {
             WorkspaceSection::Chat => &self.chat_state,
             WorkspaceSection::SwarmCode => &self.swarm_code_state,
             WorkspaceSection::SwarmSecurity => &self.swarm_security_state,
+            WorkspaceSection::SwarmTeam => &self.swarm_team_state,
         }
     }
 
@@ -959,6 +980,7 @@ impl App {
             WorkspaceSection::Chat => &mut self.chat_state,
             WorkspaceSection::SwarmCode => &mut self.swarm_code_state,
             WorkspaceSection::SwarmSecurity => &mut self.swarm_security_state,
+            WorkspaceSection::SwarmTeam => &mut self.swarm_team_state,
         }
     }
 
@@ -967,6 +989,23 @@ impl App {
             return;
         }
         self.active_section = target;
+        self.show_swarm_hub = false;
+        self.show_help = false;
+    }
+
+    pub fn set_team_domain(&mut self, domain: SwarmDomain) {
+        if self.is_busy || !domain.is_team_mode() {
+            return;
+        }
+        self.team_domain = domain;
+        self.swarm_team_state.set_roster_for_domain(domain);
+        self.swarm_team_state.entries.push(ChatEntry::System(format!(
+            "{} -> {}",
+            domain.display_name(),
+            domain.subtitle()
+        )));
+        self.swarm_team_state.auto_scroll = true;
+        self.active_section = WorkspaceSection::SwarmTeam;
         self.show_swarm_hub = false;
         self.show_help = false;
     }
@@ -1306,6 +1345,10 @@ impl App {
                     lead_max_iterations: self.config.max_tool_iterations,
                     approval_mode: self.config.approval_mode,
                     target_scope,
+                    verify_command: self.config.swarm_verify_command.clone(),
+                    verify_timeout_secs: self.config.swarm_verify_timeout_secs,
+                    rounds: if saver { 1 } else { self.config.swarm_rounds },
+                    saver,
                 },
             )
             .with_providers(mixed.workers, mixed.lead);
@@ -1656,6 +1699,11 @@ impl App {
                 });
                 st.auto_scroll = true;
             }
+            SwarmEvent::Phase(text) => {
+                let st = self.section_state_mut(section);
+                st.entries.push(ChatEntry::System(text));
+                st.auto_scroll = true;
+            }
             SwarmEvent::Error(err) => {
                 let st = self.section_state_mut(section);
                 st.streaming_buffer.clear();
@@ -1687,6 +1735,9 @@ impl App {
                      /swarm code [folder]                            Switch to Swarm: Code (3 coders -> Chief)\n\
                      /swarm security defense [folder]                Security Defense: folder/code vulnerability audit\n\
                      /swarm security threat [folder]                 Security Threat Model (STRIDE / Config / Deps)\n\
+                     /swarm competitive [folder]                     Candidates compete in isolated copies, tests pick the winner\n\
+                     /swarm collaborative [folder]                   One agent per area: database, backend, frontend, security, testing\n\
+                     /swarm red-eclipse [folder]                     Red team attacks, blue team hardens, verified rounds\n\
                      /swarm off  (or /chat)                          Return to standard single-agent Chat\n\
                      /scope <folder|off>                             Focus active Swarm on a specific folder/file\n\
                      /setup                                          Open setup wizard (Terms, Telemetry, Folder)\n\
@@ -1744,9 +1795,15 @@ impl App {
                             self.set_scope(Some(sc));
                         }
                     }
+                    Some(team) => {
+                        self.set_team_domain(team);
+                        if let Some(scope) = arg2 {
+                            self.set_scope(Some(scope));
+                        }
+                    }
                     None => {
                         self.active_state_mut().entries.push(ChatEntry::Error(format!(
-                            "Unknown swarm domain '{domain_str}'. Use: /swarm code | /swarm security defense [folder] | /swarm security threat | /swarm off"
+                            "Unknown swarm domain '{domain_str}'. Use: /swarm code | competitive | collaborative | red-eclipse | security defense [folder] | security threat | off"
                         )));
                     }
                 },

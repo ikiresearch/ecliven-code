@@ -161,6 +161,25 @@ Los modelos se indican como `proveedor/modelo` (por ejemplo `anthropic/test-mode
 - **Model router:** con `[router].enabled = true`, cada turno se clasifica sin llamar a ningun modelo (dificultad `simple`/`standard`/`complex` y especialidad: security, frontend, backend, data, tests, docs, devops). Se usa el modelo de la especialidad si existe; si no, `cheap`, `standard` o `strong` segun la dificultad. El chat muestra que modelo eligio y por que.
 - **Modo ahorro** (`--saver`, `/saver on` o `saver_mode = true`): baja un nivel de modelo (o usa `cheap` si el router esta apagado), limita la respuesta a 2048 tokens, recorta a 4000 caracteres la salida de herramientas que queda en el historial, compacta al 60 % y pide al modelo respuestas cortas y lecturas minimas. En Swarm, los especialistas hacen como maximo 4 iteraciones y usan `cheap` si no hay `[swarm].workers`.
 
+## Modos de Swarm por equipos
+
+| Modo | Comando | Qué hace |
+|---|---|---|
+| Competitive | `/swarm competitive` · `--swarm competitive` | 3 candidatos implementan la misma tarea, cada uno en una copia aislada del workspace (sin shell). Ecliven ejecuta la verificación en cada copia, ordena por resultado y tamaño del cambio, y aplica el ganador tras tu aprobación. |
+| Collaborative | `/swarm collaborative` · `--swarm collaborative` | Un planificador divide el proyecto por áreas; solo se ejecutan las necesarias, en orden base de datos → backend → frontend → seguridad → testing, cada una con el handoff de las anteriores. |
+| Red Eclipse | `/swarm red-eclipse` · `--swarm red-eclipse` | Por ronda: el equipo rojo (solo lectura) mapea rutas de ataque, el azul corrige y añade tests de regresión, y Ecliven ejecuta la verificación. Solo uso defensivo sobre tu propio workspace. |
+
+```toml
+[swarm]
+verify = "cargo test --quiet"   # si falta se detecta: cargo, npm, go, pytest o make
+verify_timeout_secs = 600
+rounds = 2                      # Red Eclipse, de 1 a 3
+```
+
+- La verificación pasa por la misma política y aprobación que `run_command`; `swarm.verify` de un repo desconocido requiere Workspace Trust.
+- Competitive necesita `workspace-write`. Si el workspace cambió mientras corría, el ganador no se aplica.
+- En modo ahorro no se llama al modelo líder (el informe es determinista) y Red Eclipse hace 1 ronda.
+
 ## Politica de seguridad central
 
 Todas las herramientas pasan por la misma politica antes de ejecutarse:

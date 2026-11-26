@@ -76,6 +76,12 @@ pub enum CliSwarmDomain {
     SecurityDefense,
     /// Defensive Security Swarm — STRIDE threat model, config/deps & hardening
     SecurityThreat,
+    /// Independent candidates in isolated copies; the winner is chosen by tests
+    Competitive,
+    /// One agent per area (database, backend, frontend, security, testing)
+    Collaborative,
+    /// Red Eclipse: red team attack paths, blue team fixes, verified rounds
+    RedEclipse,
 }
 
 impl From<CliSwarmDomain> for SwarmDomain {
@@ -86,6 +92,9 @@ impl From<CliSwarmDomain> for SwarmDomain {
                 SwarmDomain::security_defense()
             }
             CliSwarmDomain::SecurityThreat => SwarmDomain::security_threat(),
+            CliSwarmDomain::Competitive => SwarmDomain::Competitive,
+            CliSwarmDomain::Collaborative => SwarmDomain::Collaborative,
+            CliSwarmDomain::RedEclipse => SwarmDomain::RedEclipse,
         }
     }
 }
@@ -180,7 +189,7 @@ pub struct Cli {
     #[arg(long = "resume")]
     pub resume: Option<String>,
 
-    /// Start directly in Swarm mode (code, security, security-defense, security-threat)
+    /// Start directly in Swarm mode (code, security, security-defense, security-threat, competitive, collaborative, red-eclipse)
     #[arg(short = 's', long = "swarm", value_enum)]
     pub swarm: Option<CliSwarmDomain>,
 

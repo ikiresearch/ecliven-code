@@ -84,6 +84,12 @@ impl Theme {
             SwarmDomain::Security(_) => Style::default()
                 .fg(Self::SHIELD_ROSE)
                 .add_modifier(Modifier::BOLD),
+            SwarmDomain::Competitive | SwarmDomain::Collaborative => Style::default()
+                .fg(Self::SOLAR_GOLD)
+                .add_modifier(Modifier::BOLD),
+            SwarmDomain::RedEclipse => Style::default()
+                .fg(Self::DIFF_RED)
+                .add_modifier(Modifier::BOLD),
         }
     }
 

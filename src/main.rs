@@ -337,6 +337,10 @@ async fn run_headless_swarm(
             lead_max_iterations: config.max_tool_iterations,
             approval_mode: config.approval_mode,
             target_scope,
+            verify_command: config.swarm_verify_command.clone(),
+            verify_timeout_secs: config.swarm_verify_timeout_secs,
+            rounds: if saver { 1 } else { config.swarm_rounds },
+            saver,
         },
     )
     .with_providers(mixed.workers, mixed.lead);
@@ -388,6 +392,9 @@ async fn run_headless_swarm(
                 if output.is_error {
                     eprintln!("[tool:{tool_name}:error] {}", output.content);
                 }
+            }
+            SwarmEvent::Phase(text) => {
+                eprintln!("\n[swarm] {text}");
             }
             SwarmEvent::Error(err) => {
                 eprintln!("Error: {err}");

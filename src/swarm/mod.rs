@@ -1,4 +1,6 @@
 pub mod domain;
+mod team;
+pub mod workcopy;
 
 use std::sync::Arc;
 
@@ -18,6 +20,8 @@ pub enum SwarmAgentStatus {
     Idle,
     Running { active_tool: Option<String> },
     Done,
+    /// Not needed for this task (collaborative plan left the area out).
+    Skipped,
     Failed(String),
 }
 
@@ -62,6 +66,8 @@ pub enum SwarmEvent {
         tool_name: String,
         output: ToolOutput,
     },
+    /// Progress of team modes: plan, scoreboard, round results.
+    Phase(String),
     Error(String),
     SwarmComplete,
 }
@@ -74,6 +80,13 @@ pub struct SwarmOptions {
     pub lead_max_iterations: usize,
     pub approval_mode: ApprovalMode,
     pub target_scope: Option<String>,
+    /// Objective check for team modes; auto-detected when `None`.
+    pub verify_command: Option<String>,
+    pub verify_timeout_secs: u64,
+    /// Red Eclipse rounds (1-3).
+    pub rounds: usize,
+    /// Skip the lead model and return the deterministic report.
+    pub saver: bool,
 }
 
 impl Default for SwarmOptions {
@@ -85,6 +98,10 @@ impl Default for SwarmOptions {
             lead_max_iterations: 10,
             approval_mode: ApprovalMode::Ask,
             target_scope: None,
+            verify_command: None,
+            verify_timeout_secs: 600,
+            rounds: 2,
+            saver: false,
         }
     }
 }
@@ -186,6 +203,25 @@ impl SwarmEngine {
             scope: validated_scope.clone(),
         });
 
+        if self.domain.is_team_mode() {
+            match self.domain {
+                SwarmDomain::Competitive => {
+                    self.run_competitive(session, user_input, validated_scope, &event_tx)
+                        .await
+                }
+                SwarmDomain::Collaborative => {
+                    self.run_collaborative(session, user_input, validated_scope, &event_tx)
+                        .await
+                }
+                _ => {
+                    self.run_red_eclipse(session, user_input, validated_scope, &event_tx)
+                        .await
+                }
+            }
+            let _ = event_tx.send(SwarmEvent::SwarmComplete);
+            return;
+        }
+
         let base_prompt = build_system_prompt(&self.tool_ctx.workspace_root);
         let specialists = self.domain.specialists();
         let prior_context = summarize_recent_history(session);
@@ -195,7 +231,8 @@ impl SwarmEngine {
             let provider = self.worker_provider(idx);
             let tools = Arc::clone(&self.read_only_tools);
             let tool_ctx = self.tool_ctx.clone();
-            let options = self.options.clone();
+            let mut options = self.options.clone();
+            options.approval_mode = ApprovalMode::Ask;
             let base_prompt = base_prompt.clone();
             let user_input = user_input.clone();
             let prior_context = prior_context.clone();
@@ -259,8 +296,18 @@ impl SwarmEngine {
             &user_input,
             &outcomes,
         );
-        let lead_system_prompt = format!("{base_prompt}\n\n{}", self.domain.lead_directive());
+        self.run_lead(session, synthesis_prompt, &event_tx).await;
 
+        let _ = event_tx.send(SwarmEvent::SwarmComplete);
+    }
+
+    async fn run_lead(
+        &self,
+        session: &mut Session,
+        prompt: String,
+        event_tx: &mpsc::UnboundedSender<SwarmEvent>,
+    ) {
+        let base_prompt = build_system_prompt(&self.tool_ctx.workspace_root);
         let lead_engine = AgentEngine::with_system_prompt(
             Arc::clone(self.lead_provider.as_ref().unwrap_or(&self.provider)),
             Arc::clone(&self.full_tools),
@@ -271,61 +318,95 @@ impl SwarmEngine {
                 max_tool_iterations: self.options.lead_max_iterations,
                 approval_mode: self.options.approval_mode,
             },
-            lead_system_prompt,
+            format!("{base_prompt}\n\n{}", self.domain.lead_directive()),
         );
+        drive_agent(
+            lead_engine,
+            session,
+            prompt,
+            event_tx,
+            None,
+            self.domain.lead_badge().to_string(),
+        )
+        .await;
+    }
+}
 
-        let (lead_tx, mut lead_rx) = mpsc::unbounded_channel::<AgentEvent>();
-        let forward_tx = event_tx.clone();
-        let badge_clone = lead_badge.clone();
-
-        let forward_handle = tokio::spawn(async move {
-            while let Some(ev) = lead_rx.recv().await {
-                match ev {
-                    AgentEvent::AssistantDelta(chunk) => {
-                        let _ = forward_tx.send(SwarmEvent::SynthesisDelta(chunk));
+/// Runs one agent turn and forwards its events. With `worker`, the final answer
+/// stays a worker report; without, it streams as the lead synthesis.
+async fn drive_agent(
+    engine: AgentEngine,
+    session: &mut Session,
+    prompt: String,
+    event_tx: &mpsc::UnboundedSender<SwarmEvent>,
+    worker: Option<(SwarmAgentRole, String)>,
+    lead_badge: String,
+) -> (String, Option<String>) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+    let fwd = event_tx.clone();
+    let handle = tokio::spawn(async move {
+        let mut content = String::new();
+        let mut error = None;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::AssistantDelta(chunk) => {
+                    if worker.is_none() {
+                        let _ = fwd.send(SwarmEvent::SynthesisDelta(chunk));
                     }
-                    AgentEvent::AssistantFinished { content, usage } => {
-                        let _ = forward_tx.send(SwarmEvent::SynthesisFinished {
-                            lead_badge: badge_clone.clone(),
-                            content,
+                }
+                AgentEvent::AssistantFinished { content: c, usage } => {
+                    if !c.trim().is_empty() {
+                        content = c.clone();
+                    }
+                    if worker.is_none() {
+                        let _ = fwd.send(SwarmEvent::SynthesisFinished {
+                            lead_badge: lead_badge.clone(),
+                            content: c,
                             usage,
                         });
                     }
-                    AgentEvent::ToolApprovalRequested {
+                }
+                AgentEvent::ToolApprovalRequested {
+                    call_id,
+                    tool_name,
+                    preview,
+                    respond_to,
+                } => {
+                    let _ = fwd.send(SwarmEvent::ToolApprovalRequested {
                         call_id,
                         tool_name,
                         preview,
                         respond_to,
-                    } => {
-                        let _ = forward_tx.send(SwarmEvent::ToolApprovalRequested {
-                            call_id,
-                            tool_name,
-                            preview,
-                            respond_to,
+                    });
+                }
+                AgentEvent::ToolStarted { tool_name, summary } => {
+                    if let Some((role, name)) = &worker {
+                        let _ = fwd.send(SwarmEvent::WorkerStatus {
+                            agent_id: role.id.to_string(),
+                            agent_name: name.clone(),
+                            badge: role.badge.to_string(),
+                            status: SwarmAgentStatus::Running {
+                                active_tool: Some(tool_name.clone()),
+                            },
                         });
                     }
-                    AgentEvent::ToolStarted { tool_name, summary } => {
-                        let _ = forward_tx.send(SwarmEvent::ToolStarted { tool_name, summary });
-                    }
-                    AgentEvent::ToolCompleted { tool_name, output } => {
-                        let _ = forward_tx.send(SwarmEvent::ToolCompleted { tool_name, output });
-                    }
-                    AgentEvent::Error(err) => {
-                        let _ = forward_tx.send(SwarmEvent::Error(err));
-                    }
-                    AgentEvent::Notice(_) => {}
-                    AgentEvent::TurnComplete => break,
+                    let _ = fwd.send(SwarmEvent::ToolStarted { tool_name, summary });
                 }
+                AgentEvent::ToolCompleted { tool_name, output } => {
+                    let _ = fwd.send(SwarmEvent::ToolCompleted { tool_name, output });
+                }
+                AgentEvent::Error(err) => {
+                    error = Some(err.clone());
+                    let _ = fwd.send(SwarmEvent::Error(err));
+                }
+                AgentEvent::Notice(_) => {}
+                AgentEvent::TurnComplete => break,
             }
-        });
-
-        lead_engine
-            .run_turn(session, synthesis_prompt, lead_tx)
-            .await;
-        let _ = forward_handle.await;
-
-        let _ = event_tx.send(SwarmEvent::SwarmComplete);
-    }
+        }
+        (content, error)
+    });
+    engine.run_turn(session, prompt, tx).await;
+    handle.await.unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -363,7 +444,7 @@ async fn run_worker(
             max_tokens: options.max_tokens,
             temperature: options.temperature,
             max_tool_iterations: options.worker_max_iterations,
-            approval_mode: ApprovalMode::Ask,
+            approval_mode: options.approval_mode,
         },
         system_prompt,
     );
@@ -526,6 +607,7 @@ fn build_synthesis_prompt(
                  3. Apply the combined changes to the workspace if the user asked for edits, and explain briefly what was taken from each candidate.",
             );
         }
+        SwarmDomain::Competitive | SwarmDomain::Collaborative | SwarmDomain::RedEclipse => {}
         SwarmDomain::Security(_) => {
             out.push_str(
                 "\n=== Security Lead Synthesis Instructions ===\n\
