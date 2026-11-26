@@ -223,6 +223,8 @@ pub struct AppConfig {
     pub router: crate::ai::router::RouterConfig,
     /// Minimize tokens and cost: cheaper models, shorter outputs, earlier compaction.
     pub saver_mode: bool,
+    /// Prompt caching for API providers (`off`, `5m`, `1h`).
+    pub prompt_cache: crate::ai::PromptCache,
     /// `provider/model` refs for Swarm workers (round-robin); empty = active model.
     pub swarm_worker_models: Vec<String>,
     pub swarm_lead_model: Option<String>,
@@ -296,6 +298,7 @@ fn default_true() -> bool {
 struct FileConfig {
     router: Option<crate::ai::router::RouterConfig>,
     saver_mode: Option<bool>,
+    prompt_cache: Option<crate::ai::PromptCache>,
     knowledge: Option<KnowledgeConfig>,
     swarm: Option<FileSwarmConfig>,
     sandbox_mode: Option<SandboxMode>,
@@ -483,6 +486,7 @@ impl AppConfig {
             mcp_servers: Vec::new(),
             router: crate::ai::router::RouterConfig::default(),
             saver_mode: false,
+            prompt_cache: crate::ai::PromptCache::default(),
             swarm_worker_models: Vec::new(),
             swarm_lead_model: None,
             swarm_verify_command: None,
@@ -727,6 +731,9 @@ impl AppConfig {
         }
         if let Some(saver) = parsed.saver_mode {
             self.saver_mode = saver;
+        }
+        if let Some(cache) = parsed.prompt_cache {
+            self.prompt_cache = cache;
         }
         if let Some(swarm) = parsed.swarm {
             if let Some(workers) = swarm.workers {

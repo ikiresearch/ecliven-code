@@ -250,6 +250,7 @@ pub struct App {
     pub tick_count: usize,
     pub started_at: Instant,
     pub total_input_tokens: u32,
+    pub total_cache_read_tokens: u32,
     pub total_output_tokens: u32,
     pub available_update: Option<ReleaseInfo>,
     pub detected_clis: Vec<DetectedCli>,
@@ -352,6 +353,7 @@ impl App {
             tick_count: 0,
             started_at: Instant::now(),
             total_input_tokens: 0,
+            total_cache_read_tokens: 0,
             total_output_tokens: 0,
             available_update: None,
             detected_clis: detect_installed_clis(),
@@ -1502,6 +1504,8 @@ impl App {
                         self.total_input_tokens.saturating_add(u.input_tokens);
                     self.total_output_tokens =
                         self.total_output_tokens.saturating_add(u.output_tokens);
+                    self.total_cache_read_tokens =
+                        self.total_cache_read_tokens.saturating_add(u.cache_read_tokens);
                 }
             }
             AgentEvent::ToolApprovalRequested {
@@ -1622,6 +1626,8 @@ impl App {
                         self.total_input_tokens.saturating_add(u.input_tokens);
                     self.total_output_tokens =
                         self.total_output_tokens.saturating_add(u.output_tokens);
+                    self.total_cache_read_tokens =
+                        self.total_cache_read_tokens.saturating_add(u.cache_read_tokens);
                 }
             }
             SwarmEvent::Synthesizing { .. } => {
@@ -1655,6 +1661,8 @@ impl App {
                         self.total_input_tokens.saturating_add(u.input_tokens);
                     self.total_output_tokens =
                         self.total_output_tokens.saturating_add(u.output_tokens);
+                    self.total_cache_read_tokens =
+                        self.total_cache_read_tokens.saturating_add(u.cache_read_tokens);
                 }
             }
             SwarmEvent::ToolApprovalRequested {
@@ -2030,7 +2038,7 @@ impl App {
                     "disabled"
                 };
                 let msg = format!(
-                    "Section:   {section_desc}\nScope:     {scope_desc}\nWorkspace: {}\nProvider:  {} ({})\nModel:     {}\nEndpoint:  {}\nApproval:  {:?}\nSandbox:   {}\nTelemetry: {telemetry_desc}\nTokens:    in={} out={}",
+                    "Section:   {section_desc}\nScope:     {scope_desc}\nWorkspace: {}\nProvider:  {} ({})\nModel:     {}\nEndpoint:  {}\nApproval:  {:?}\nSandbox:   {}\nTelemetry: {telemetry_desc}\nTokens:    in={} out={} cached={} ({}% of input, prompt cache: {})",
                     self.config.workspace_dir.display(),
                     self.config.active_provider,
                     key_status,
@@ -2039,7 +2047,16 @@ impl App {
                     self.config.approval_mode,
                     self.config.sandbox_policy().describe(),
                     self.total_input_tokens,
-                    self.total_output_tokens
+                    self.total_output_tokens,
+                    self.total_cache_read_tokens,
+                    (self.total_cache_read_tokens as u64 * 100)
+                        .checked_div(self.total_input_tokens as u64)
+                        .unwrap_or(0),
+                    match self.config.prompt_cache {
+                        crate::ai::PromptCache::Off => "off",
+                        crate::ai::PromptCache::Short => "5m",
+                        crate::ai::PromptCache::Long => "1h",
+                    }
                 );
                 self.active_state_mut().entries.push(ChatEntry::System(msg));
             }

@@ -76,6 +76,7 @@ async fn edit_file_requires_approval_in_ask_mode_and_applies_when_approved() {
             usage: Some(TokenUsage {
                 input_tokens: 15,
                 output_tokens: 10,
+                ..Default::default()
             }),
             stop_reason: Some("tool_use".into()),
             external_tools: Vec::new(),
@@ -86,6 +87,7 @@ async fn edit_file_requires_approval_in_ask_mode_and_applies_when_approved() {
             usage: Some(TokenUsage {
                 input_tokens: 25,
                 output_tokens: 8,
+                ..Default::default()
             }),
             stop_reason: Some("end_turn".into()),
             external_tools: Vec::new(),
@@ -355,6 +357,7 @@ impl LlmProvider for DomainMockProvider {
             usage: Some(TokenUsage {
                 input_tokens: 12,
                 output_tokens: 6,
+                ..Default::default()
             }),
             stop_reason: Some("end_turn".into()),
             external_tools: Vec::new(),

@@ -688,6 +688,7 @@ mod tests {
                 usage: Some(TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..Default::default()
                 }),
                 stop_reason: Some("end_turn".into()),
                 external_tools: Vec::new(),

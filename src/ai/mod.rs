@@ -120,8 +120,26 @@ pub struct CompletionRequest {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TokenUsage {
+    /// All prompt tokens of the request, cached or not (drives the context bar).
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Prompt tokens served from the provider's prompt cache (billed at a discount).
+    pub cache_read_tokens: u32,
+    /// Prompt tokens written to the prompt cache by this request.
+    pub cache_write_tokens: u32,
+}
+
+/// Prompt caching: reuse the stable prefix (system prompt, tools, history)
+/// across turns. `5m`/`1h` set the cache lifetime where the provider allows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PromptCache {
+    #[serde(rename = "off")]
+    Off,
+    #[default]
+    #[serde(rename = "5m")]
+    Short,
+    #[serde(rename = "1h")]
+    Long,
 }
 
 #[derive(Debug, Clone, Default)]

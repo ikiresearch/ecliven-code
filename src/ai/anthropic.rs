@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::ai::{
-    AiError, CompletionRequest, CompletionResponse, LlmProvider, Message, Role, TokenUsage,
-    ToolCall,
+    AiError, CompletionRequest, CompletionResponse, LlmProvider, Message, PromptCache, Role,
+    TokenUsage, ToolCall,
 };
 
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -18,6 +18,7 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     model: String,
+    cache: PromptCache,
 }
 
 impl AnthropicProvider {
@@ -27,12 +28,26 @@ impl AnthropicProvider {
             api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
+            cache: PromptCache::default(),
+        }
+    }
+
+    pub fn with_prompt_cache(mut self, cache: PromptCache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    fn cache_control(&self) -> Option<Value> {
+        match self.cache {
+            PromptCache::Off => None,
+            PromptCache::Short => Some(json!({ "type": "ephemeral" })),
+            PromptCache::Long => Some(json!({ "type": "ephemeral", "ttl": "1h" })),
         }
     }
 
     fn build_payload(&self, request: &CompletionRequest, stream: bool) -> Value {
-        let messages = convert_messages(&request.messages);
-        let tools: Vec<Value> = request
+        let mut messages = convert_messages(&request.messages);
+        let mut tools: Vec<Value> = request
             .tools
             .iter()
             .map(|t| {
@@ -44,11 +59,24 @@ impl AnthropicProvider {
             })
             .collect();
 
+        // Breakpoints (max 4 allowed): tools + system, and the end of the
+        // conversation so each turn reuses the previous turn's prefix.
+        let mut system = json!(request.system_prompt);
+        if let Some(cc) = self.cache_control() {
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = cc.clone();
+            }
+            if !request.system_prompt.is_empty() {
+                system = json!([{ "type": "text", "text": request.system_prompt, "cache_control": cc }]);
+            }
+            mark_last_block(&mut messages, cc);
+        }
+
         let mut payload = json!({
             "model": self.model,
             "max_tokens": request.max_tokens,
             "temperature": request.temperature,
-            "system": request.system_prompt,
+            "system": system,
             "messages": messages,
             "stream": stream,
         });
@@ -58,6 +86,41 @@ impl AnthropicProvider {
         }
 
         payload
+    }
+}
+
+fn mark_last_block(messages: &mut [Value], cache_control: Value) {
+    let Some(last) = messages.last_mut() else {
+        return;
+    };
+    match last.get_mut("content") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            let text = std::mem::take(text);
+            last["content"] = json!([{ "type": "text", "text": text, "cache_control": cache_control }]);
+        }
+        Some(Value::Array(blocks)) => {
+            let usable = blocks.iter_mut().rev().find(|b| {
+                b.get("type").and_then(Value::as_str) != Some("text")
+                    || b.get("text").and_then(Value::as_str).is_some_and(|t| !t.is_empty())
+            });
+            if let Some(block) = usable {
+                block["cache_control"] = cache_control;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `input_tokens` reported by the API excludes cached tokens; ours includes them.
+fn usage_from(u: &Value) -> TokenUsage {
+    let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
+    let read = get("cache_read_input_tokens");
+    let write = get("cache_creation_input_tokens");
+    TokenUsage {
+        input_tokens: get("input_tokens").saturating_add(read).saturating_add(write),
+        output_tokens: get("output_tokens"),
+        cache_read_tokens: read,
+        cache_write_tokens: write,
     }
 }
 
@@ -207,8 +270,11 @@ impl LlmProvider for AnthropicProvider {
 
                 match event.get("type").and_then(Value::as_str).unwrap_or("") {
                     "message_start" => {
-                        if let Some(u) = event.pointer("/message/usage/input_tokens").and_then(Value::as_u64) {
-                            usage.input_tokens = u as u32;
+                        if let Some(u) = event.pointer("/message/usage") {
+                            let start = usage_from(u);
+                            usage.input_tokens = start.input_tokens;
+                            usage.cache_read_tokens = start.cache_read_tokens;
+                            usage.cache_write_tokens = start.cache_write_tokens;
                         }
                     }
                     "content_block_start" => {
@@ -332,10 +398,7 @@ fn parse_non_streaming_response(body: &Value) -> Result<CompletionResponse, AiEr
         }
     }
 
-    let usage = body.get("usage").map(|u| TokenUsage {
-        input_tokens: u.get("input_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-        output_tokens: u.get("output_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-    });
+    let usage = body.get("usage").map(usage_from);
 
     let stop_reason = body
         .get("stop_reason")
@@ -400,5 +463,52 @@ mod tests {
         assert_eq!(parsed.tool_calls.len(), 1);
         assert_eq!(parsed.tool_calls[0].name, "read_file");
         assert_eq!(parsed.usage.unwrap().input_tokens, 120);
+    }
+
+    fn cache_request() -> CompletionRequest {
+        CompletionRequest {
+            system_prompt: "system rules".into(),
+            messages: vec![Message::user("first"), Message::assistant("ok", Vec::new()), Message::user("second")],
+            tools: vec![
+                crate::ai::ToolSpec { name: "a".into(), description: "a".into(), input_schema: json!({}) },
+                crate::ai::ToolSpec { name: "b".into(), description: "b".into(), input_schema: json!({}) },
+            ],
+            max_tokens: 64,
+            temperature: 0.0,
+        }
+    }
+
+    #[test]
+    fn prompt_cache_marks_tools_system_and_last_message() {
+        let p = AnthropicProvider::new("k".into(), "https://example.com".into(), "test/model".into());
+        let body = p.build_payload(&cache_request(), false);
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["content"][0]["text"], "second");
+        assert_eq!(last["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body.to_string().matches("cache_control").count(), 3);
+
+        let long = p.with_prompt_cache(PromptCache::Long).build_payload(&cache_request(), false);
+        assert_eq!(long["system"][0]["cache_control"]["ttl"], "1h");
+    }
+
+    #[test]
+    fn prompt_cache_off_sends_plain_payload() {
+        let p = AnthropicProvider::new("k".into(), "https://example.com".into(), "test/model".into())
+            .with_prompt_cache(PromptCache::Off);
+        let body = p.build_payload(&cache_request(), false);
+        assert_eq!(body["system"], "system rules");
+        assert!(!body.to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn usage_counts_cached_prompt_tokens() {
+        let u = usage_from(&json!({
+            "input_tokens": 100, "output_tokens": 7,
+            "cache_creation_input_tokens": 20, "cache_read_input_tokens": 880
+        }));
+        assert_eq!((u.input_tokens, u.cache_read_tokens, u.cache_write_tokens, u.output_tokens), (1000, 880, 20, 7));
     }
 }
