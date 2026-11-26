@@ -294,6 +294,22 @@ trusted = true                     # sin pedir aprobacion (por defecto se pide c
 ## Verificacion
 
 ```bash
-cargo test
-cargo clippy --all-targets
+cargo test --locked
+cargo clippy --all-targets --locked -- -D warnings
+cargo deny check
 ```
+
+Guia completa en [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Seguridad
+
+Reporta vulnerabilidades en privado desde [Security -> Report a vulnerability](https://github.com/ikiresearch/ecliven-code/security/advisories/new), nunca en un issue publico. Alcance, plazos y como verificar un release en [SECURITY.md](SECURITY.md).
+
+## Licencia
+
+Disponible bajo cualquiera de estas licencias, a tu eleccion:
+
+- [Apache License, Version 2.0](LICENSE-APACHE)
+- [MIT](LICENSE-MIT)
+
+Salvo que indiques lo contrario, cualquier contribucion que envies para incluirla en el proyecto se licencia de la misma forma, sin terminos adicionales.

@@ -1,0 +1,53 @@
+name: Reporte de error
+description: Algo no funciona como se espera.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        No pegues API keys, tokens ni datos privados. Si es una vulnerabilidad, repórtala en privado desde la pestaña Security.
+  - type: input
+    id: version
+    attributes:
+      label: Versión
+      description: Salida de `ecliven --version`.
+      placeholder: ecliven 0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Sistema operativo
+      options: [Linux, macOS, Windows, Otro]
+    validations:
+      required: true
+  - type: input
+    id: provider
+    attributes:
+      label: Proveedor y modelo
+      placeholder: test/model
+  - type: dropdown
+    id: sandbox
+    attributes:
+      label: Modo de sandbox
+      options: [workspace-write, read-only, danger-full-access, No lo sé]
+  - type: textarea
+    id: steps
+    attributes:
+      label: Pasos para reproducirlo
+      placeholder: |
+        1. ecliven ...
+        2. /comando ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Qué esperabas y qué pasó
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Salida o logs relevantes
+      render: text
