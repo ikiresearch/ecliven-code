@@ -23,9 +23,9 @@ type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
 
 enum Transport {
     Stdio {
-        stdin: Mutex<ChildStdin>,
+        stdin: Box<Mutex<ChildStdin>>,
         pending: Pending,
-        _child: Mutex<Child>,
+        _child: Box<Mutex<Child>>,
     },
     Http {
         client: reqwest::Client,
@@ -111,9 +111,9 @@ impl McpClient {
                 }
             });
             Transport::Stdio {
-                stdin: Mutex::new(stdin),
+                stdin: Box::new(Mutex::new(stdin)),
                 pending,
-                _child: Mutex::new(child),
+                _child: Box::new(Mutex::new(child)),
             }
         } else if let Some(url) = &cfg.url {
             Transport::Http {
