@@ -42,6 +42,7 @@ fn usage_of(v: &Value) -> Option<TokenUsage> {
     Some(TokenUsage {
         input_tokens: input as u32,
         output_tokens: output as u32,
+        ..Default::default()
     })
 }
 

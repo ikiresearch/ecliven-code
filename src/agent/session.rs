@@ -109,6 +109,14 @@ impl Session {
             .total_usage
             .output_tokens
             .saturating_add(usage.output_tokens);
+        self.total_usage.cache_read_tokens = self
+            .total_usage
+            .cache_read_tokens
+            .saturating_add(usage.cache_read_tokens);
+        self.total_usage.cache_write_tokens = self
+            .total_usage
+            .cache_write_tokens
+            .saturating_add(usage.cache_write_tokens);
         self.last_prompt_tokens = usage.input_tokens;
     }
 

@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 
 use crate::ai::{
-    AiError, CompletionRequest, CompletionResponse, LlmProvider, Message, Role, TokenUsage,
-    ToolCall,
+    AiError, CompletionRequest, CompletionResponse, LlmProvider, Message, PromptCache, Role,
+    TokenUsage, ToolCall,
 };
 
 pub struct OpenAiCompatibleProvider {
@@ -18,6 +18,7 @@ pub struct OpenAiCompatibleProvider {
     base_url: String,
     model: String,
     is_openrouter: bool,
+    cache: PromptCache,
 }
 
 impl OpenAiCompatibleProvider {
@@ -35,7 +36,19 @@ impl OpenAiCompatibleProvider {
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
             is_openrouter,
+            cache: PromptCache::default(),
         }
+    }
+
+    pub fn with_prompt_cache(mut self, cache: PromptCache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    /// Models behind OpenRouter that only cache with explicit breakpoints.
+    fn needs_breakpoints(&self) -> bool {
+        self.is_openrouter
+            && (self.model.starts_with("anthropic/") || self.model.starts_with("google/gemini"))
     }
 
     fn build_payload(&self, request: &CompletionRequest, stream: bool) -> Value {
@@ -66,6 +79,23 @@ impl OpenAiCompatibleProvider {
             })
             .collect();
 
+        if self.cache != PromptCache::Off && self.needs_breakpoints() {
+            let cc = json!({ "type": "ephemeral" });
+            for idx in [0, messages.len().saturating_sub(1)] {
+                let Some(msg) = messages.get_mut(idx) else { continue };
+                let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+                if !matches!(role, "system" | "user") {
+                    continue;
+                }
+                if let Some(Value::String(text)) = msg.get_mut("content") {
+                    if !text.is_empty() {
+                        let text = std::mem::take(text);
+                        msg["content"] = json!([{ "type": "text", "text": text, "cache_control": cc }]);
+                    }
+                }
+            }
+        }
+
         let mut payload = json!({
             "model": self.model,
             "messages": messages,
@@ -73,6 +103,13 @@ impl OpenAiCompatibleProvider {
             "temperature": request.temperature,
             "stream": stream,
         });
+        if stream {
+            payload["stream_options"] = json!({ "include_usage": true });
+        }
+        if self.cache != PromptCache::Off && !self.is_openrouter {
+            // Routes requests with the same prefix to the same cache.
+            payload["prompt_cache_key"] = json!(prompt_cache_key(&request.system_prompt, &self.model));
+        }
 
         if !tools.is_empty() {
             payload["tools"] = Value::Array(tools);
@@ -80,6 +117,23 @@ impl OpenAiCompatibleProvider {
 
         payload
     }
+}
+
+fn prompt_cache_key(system_prompt: &str, model: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{model}\n{system_prompt}").as_bytes());
+    let hex: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+    format!("ecliven-{hex}")
+}
+
+fn usage_from(u: &Value) -> Option<TokenUsage> {
+    let get = |p: &str| u.pointer(p).and_then(Value::as_u64).map(|v| v as u32);
+    Some(TokenUsage {
+        input_tokens: get("/prompt_tokens")?,
+        output_tokens: get("/completion_tokens")?,
+        cache_read_tokens: get("/prompt_tokens_details/cached_tokens").unwrap_or(0),
+        cache_write_tokens: get("/prompt_tokens_details/cache_write_tokens").unwrap_or(0),
+    })
 }
 
 fn convert_message(msg: &Message) -> Value {
@@ -213,16 +267,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
                     continue;
                 };
 
-                if let Some(u) = event.get("usage") {
-                    if let (Some(pt), Some(ct)) = (
-                        u.get("prompt_tokens").and_then(Value::as_u64),
-                        u.get("completion_tokens").and_then(Value::as_u64),
-                    ) {
-                        usage = Some(TokenUsage {
-                            input_tokens: pt as u32,
-                            output_tokens: ct as u32,
-                        });
-                    }
+                if let Some(u) = event.get("usage").and_then(usage_from) {
+                    usage = Some(u);
                 }
 
                 let Some(choice) = event.pointer("/choices/0") else {
@@ -332,10 +378,7 @@ fn parse_non_streaming_response(body: &Value) -> Result<CompletionResponse, AiEr
         }
     }
 
-    let usage = body.get("usage").map(|u| TokenUsage {
-        input_tokens: u.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-        output_tokens: u.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0) as u32,
-    });
+    let usage = body.get("usage").and_then(usage_from);
 
     let stop_reason = choice
         .get("finish_reason")
@@ -381,5 +424,49 @@ mod tests {
         assert_eq!(parsed.tool_calls[0].id, "call_abc");
         assert_eq!(parsed.tool_calls[0].arguments["pattern"], "fn main");
         assert_eq!(parsed.usage.unwrap().output_tokens, 18);
+    }
+
+    fn cache_request() -> CompletionRequest {
+        CompletionRequest {
+            system_prompt: "system rules".into(),
+            messages: vec![Message::user("hello")],
+            tools: Vec::new(),
+            max_tokens: 64,
+            temperature: 0.0,
+        }
+    }
+
+    #[test]
+    fn openai_sends_stable_cache_key_and_stream_usage() {
+        let p = OpenAiCompatibleProvider::new("openai", "k".into(), "https://example.com".into(), "test/model".into(), false);
+        let a = p.build_payload(&cache_request(), true);
+        let b = p.build_payload(&cache_request(), false);
+        assert!(a["prompt_cache_key"].as_str().unwrap().starts_with("ecliven-"));
+        assert_eq!(a["prompt_cache_key"], b["prompt_cache_key"]);
+        assert_eq!(a["stream_options"]["include_usage"], true);
+        assert!(b.get("stream_options").is_none());
+        let off = p.with_prompt_cache(PromptCache::Off).build_payload(&cache_request(), false);
+        assert!(off.get("prompt_cache_key").is_none());
+    }
+
+    #[test]
+    fn openrouter_adds_breakpoints_only_for_models_that_need_them() {
+        let claude = OpenAiCompatibleProvider::new("openrouter", "k".into(), "https://example.com".into(), "anthropic/test-model".into(), true);
+        let body = claude.build_payload(&cache_request(), false);
+        assert!(body.get("prompt_cache_key").is_none());
+        assert_eq!(body["messages"][0]["content"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(body["messages"][1]["content"][0]["text"], "hello");
+        let other = OpenAiCompatibleProvider::new("openrouter", "k".into(), "https://example.com".into(), "test/model".into(), true);
+        assert!(!other.build_payload(&cache_request(), false).to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn usage_reads_cached_tokens() {
+        let u = usage_from(&json!({
+            "prompt_tokens": 1200, "completion_tokens": 30,
+            "prompt_tokens_details": { "cached_tokens": 1024 }
+        }))
+        .unwrap();
+        assert_eq!((u.input_tokens, u.cache_read_tokens, u.output_tokens), (1200, 1024, 30));
     }
 }

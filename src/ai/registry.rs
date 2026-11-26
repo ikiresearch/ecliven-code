@@ -21,7 +21,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn LlmProvider>, AiErro
                 api_key,
                 settings.base_url.clone(),
                 settings.model.clone(),
-            )))
+            )
+            .with_prompt_cache(config.prompt_cache)))
         }
         ProviderKind::OpenAi => {
             let api_key = settings.api_key.clone().ok_or(AiError::MissingApiKey {
@@ -34,7 +35,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn LlmProvider>, AiErro
                 settings.base_url.clone(),
                 settings.model.clone(),
                 false,
-            )))
+            )
+            .with_prompt_cache(config.prompt_cache)))
         }
         ProviderKind::OpenRouter => {
             let api_key = settings.api_key.clone().ok_or(AiError::MissingApiKey {
@@ -47,7 +49,8 @@ pub fn build_provider(config: &AppConfig) -> Result<Arc<dyn LlmProvider>, AiErro
                 settings.base_url.clone(),
                 settings.model.clone(),
                 true,
-            )))
+            )
+            .with_prompt_cache(config.prompt_cache)))
         }
         ProviderKind::Ollama => Ok(Arc::new(OllamaProvider::new(
             settings.base_url.clone(),

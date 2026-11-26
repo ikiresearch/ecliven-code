@@ -184,6 +184,19 @@ rounds = 2                      # Red Eclipse, de 1 a 3
 - En Red Eclipse, si el equipo azul modifica tests existentes o la configuración de tests, la verificación de esa ronda se marca como no confiable.
 - En modo ahorro no se llama al modelo líder (el informe es determinista) y Red Eclipse hace 1 ronda.
 
+## Prompt caching
+
+Activado por defecto (`prompt_cache = "5m"` en `.ecliven.toml`; `"1h"` alarga la vida de la cache, `"off"` lo desactiva). Ecliven mantiene estable el prefijo de cada peticion (instrucciones, herramientas e historial) para que el proveedor lo reutilice en el turno siguiente:
+
+| Proveedor | Que hace Ecliven |
+|---|---|
+| API con breakpoints explicitos | Marca herramientas + instrucciones del sistema y el final de la conversacion (3 de los 4 breakpoints permitidos). `1h` envia `ttl = "1h"`. |
+| API OpenAI | La cache es automatica; Ecliven envia una `prompt_cache_key` estable (hash del modelo y las instrucciones) y pide el uso de tokens tambien en streaming. |
+| OpenRouter | Breakpoints en instrucciones y ultimo mensaje para modelos que los necesitan (`anthropic/*`, `google/gemini*`); el resto se cachea automaticamente. |
+| Ollama y CLIs externos | Sin cambios (gestionan su propia cache). |
+
+`/status` muestra los tokens servidos desde la cache y el porcentaje sobre la entrada. El contador de contexto sigue incluyendo los tokens cacheados.
+
 ## Politica de seguridad central
 
 Todas las herramientas pasan por la misma politica antes de ejecutarse:

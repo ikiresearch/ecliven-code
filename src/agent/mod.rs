@@ -481,6 +481,7 @@ mod tests {
                     usage: Some(TokenUsage {
                         input_tokens: 10,
                         output_tokens: 5,
+                        ..Default::default()
                     }),
                     stop_reason: Some("tool_use".into()),
                     external_tools: Vec::new(),
@@ -491,6 +492,7 @@ mod tests {
                     usage: Some(TokenUsage {
                         input_tokens: 20,
                         output_tokens: 8,
+                        ..Default::default()
                     }),
                     stop_reason: Some("end_turn".into()),
                     external_tools: Vec::new(),

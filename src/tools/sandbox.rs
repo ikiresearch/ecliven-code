@@ -318,6 +318,7 @@ mod tests {
         assert!(SandboxPolicy::new(SandboxMode::DangerFullAccess, false, vec![]).is_restricted());
     }
 
+    #[cfg(unix)]
     #[test]
     fn seatbelt_profile_limits_writes_and_network() {
         let tmp = tempfile::TempDir::new().unwrap();

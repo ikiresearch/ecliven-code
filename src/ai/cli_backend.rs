@@ -439,6 +439,7 @@ impl LlmProvider for ExternalCliProvider {
         let usage = transcript.usage.unwrap_or(TokenUsage {
             input_tokens: (prompt.chars().count() / 4) as u32,
             output_tokens: (full_output.chars().count() / 4) as u32,
+            ..Default::default()
         });
 
         Ok(CompletionResponse {

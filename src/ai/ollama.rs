@@ -183,6 +183,7 @@ impl LlmProvider for OllamaProvider {
             usage = Some(TokenUsage {
                 input_tokens: body.get("prompt_eval_count").and_then(Value::as_u64).unwrap_or(0) as u32,
                 output_tokens: body.get("eval_count").and_then(Value::as_u64).unwrap_or(0) as u32,
+                ..Default::default()
             });
             stop_reason = body
                 .get("done_reason")
@@ -238,6 +239,7 @@ impl LlmProvider for OllamaProvider {
                             .get("eval_count")
                             .and_then(Value::as_u64)
                             .unwrap_or(0) as u32,
+                        ..Default::default()
                     });
                     stop_reason = event
                         .get("done_reason")
