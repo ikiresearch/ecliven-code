@@ -364,6 +364,20 @@ impl ToolRegistry {
         reg
     }
 
+    /// File tools for agents working in an isolated copy: no shell, no project
+    /// knowledge (that store belongs to the real workspace).
+    pub fn isolated_edit_registry() -> Self {
+        let mut reg = Self::new();
+        reg.register(Arc::new(fs::ReadFileTool));
+        reg.register(Arc::new(fs::WriteFileTool));
+        reg.register(Arc::new(fs::EditFileTool));
+        reg.register(Arc::new(patch::ApplyPatchTool));
+        reg.register(Arc::new(fs::ListDirTool));
+        reg.register(Arc::new(search::SearchFilesTool));
+        reg.register(Arc::new(search::GrepContentTool));
+        reg
+    }
+
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.get(name).cloned()
     }
