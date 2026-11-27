@@ -433,7 +433,7 @@ async fn run_worker(
     event_tx: mpsc::UnboundedSender<SwarmEvent>,
 ) -> WorkerOutcome {
     let agent_name = if show_model {
-        format!("{} [{}]", role.name, provider.model())
+        format!("{} [{}/{}]", role.name, provider.name(), provider.model())
     } else {
         role.name.to_string()
     };

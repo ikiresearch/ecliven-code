@@ -85,6 +85,10 @@ impl ProviderKind {
         }
     }
 
+    pub fn is_external_cli(&self) -> bool {
+        Self::EXTERNAL_CLIS.contains(self) || *self == Self::CustomCli
+    }
+
     pub fn parse(input: &str) -> Result<Self, ConfigError> {
         match input.trim().to_ascii_lowercase().as_str() {
             "anthropic" => Ok(Self::Anthropic),
@@ -660,6 +664,33 @@ impl AppConfig {
         self.active_settings_mut().model = model.into();
     }
 
+    /// Accepts `connector/model` (e.g. `codex/gpt-5`, `opencode/model1`) and
+    /// switches connector and model at once; anything else is a model of the
+    /// active connector. On OpenRouter, ids like `openai/gpt-4o` stay OpenRouter
+    /// models unless prefixed with another router or a CLI connector.
+    pub fn set_model_ref(&mut self, raw: &str) -> (ProviderKind, String) {
+        let raw = raw.trim();
+        if let Some((prefix, model)) = raw.split_once('/') {
+            if let Ok(kind) = ProviderKind::parse(prefix) {
+                let on_router = self.active_provider == ProviderKind::OpenRouter;
+                if !on_router || kind == ProviderKind::OpenRouter || kind.is_external_cli() {
+                    self.active_provider = kind;
+                    if !model.trim().is_empty() {
+                        self.set_model(model.trim());
+                    }
+                    return (kind, self.active_settings().model.clone());
+                }
+            }
+        }
+        self.set_model(raw);
+        (self.active_provider, raw.to_string())
+    }
+
+    /// `connector/model` label of the active model.
+    pub fn active_model_label(&self) -> String {
+        format!("{}/{}", self.active_provider.as_str(), self.active_settings().model)
+    }
+
     pub fn set_custom_cli_command(&mut self, command: impl Into<String>) {
         self.active_provider = ProviderKind::CustomCli;
         self.providers
@@ -1050,5 +1081,22 @@ trusted = true
         let debug_out = format!("{settings:?}");
         assert!(!debug_out.contains("super-secret-token"));
         assert!(debug_out.contains("REDACTED"));
+    }
+
+    #[test]
+    fn model_refs_switch_connector_and_keep_router_ids() {
+        let mut cfg = AppConfig::default_for_workspace(PathBuf::from("."));
+        cfg.set_model_ref("codex/test-model");
+        assert_eq!(cfg.active_model_label(), "codex/test-model");
+        cfg.set_model_ref("opencode/model1");
+        assert_eq!(cfg.active_provider, ProviderKind::OpenCodeCli);
+        cfg.set_model_ref("plain-model");
+        assert_eq!(cfg.active_model_label(), "opencode/plain-model");
+        cfg.set_model_ref("openrouter/vendor/test-model");
+        assert_eq!(cfg.active_model_label(), "openrouter/vendor/test-model");
+        cfg.set_model_ref("openai/test-model");
+        assert_eq!(cfg.active_model_label(), "openrouter/openai/test-model");
+        cfg.set_model_ref("claude/test-model");
+        assert_eq!(cfg.active_model_label(), "claude/test-model");
     }
 }
