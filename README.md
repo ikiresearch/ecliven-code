@@ -161,6 +161,30 @@ Los modelos se indican como `proveedor/modelo` (por ejemplo `anthropic/test-mode
 - **Model router:** con `[router].enabled = true`, cada turno se clasifica sin llamar a ningun modelo (dificultad `simple`/`standard`/`complex` y especialidad: security, frontend, backend, data, tests, docs, devops). Se usa el modelo de la especialidad si existe; si no, `cheap`, `standard` o `strong` segun la dificultad. El chat muestra que modelo eligio y por que.
 - **Modo ahorro** (`--saver`, `/saver on` o `saver_mode = true`): baja un nivel de modelo (o usa `cheap` si el router esta apagado), limita la respuesta a 2048 tokens, recorta a 4000 caracteres la salida de herramientas que queda en el historial, compacta al 60 % y pide al modelo respuestas cortas y lecturas minimas. En Swarm, los especialistas hacen como maximo 4 iteraciones y usan `cheap` si no hay `[swarm].workers`.
 
+### Router adaptativo
+
+El router aprende del rendimiento real de cada modelo, con estadisticas guardadas en `router-stats.json` dentro del directorio de datos del usuario: tasa de exito de las ultimas 20 llamadas, latencia media, tokens y costo.
+
+- **Salud:** se salta un modelo si esta en enfriamiento (60 s tras un 429, 30 s tras un 5xx o un fallo de red), si su tasa de exito baja del 60 % (con al menos 5 llamadas) o si supera `max_latency_ms`. En ese caso escala al siguiente modelo del orden del tier.
+- **Fallback y escalamiento:** cada turno prueba una cadena de modelos: el elegido, los tiers superiores (`standard`, `strong`), `fallbacks` y por ultimo el modelo activo. Ante un 429 o una caida pasa al siguiente modelo; si se excede el contexto, escala a uno mayor. Los errores de autenticacion o de peticion no se reintentan.
+- **Presupuestos:** `max_session_usd` y `max_daily_usd` usan los precios de `[router.prices]` (USD por millon de tokens). Al llegar al 80 % el router baja un tier, y al 100 % solo usa modelos sin precio (locales o CLI). Los modelos sin precio configurado no suman costo.
+- **Comandos:** `/router` muestra estadisticas, gasto y enfriamientos; `/router reset` borra lo aprendido. `adaptive = false` desactiva el aprendizaje.
+
+```toml
+[router]
+enabled = true
+cheap = "ollama/test-small"
+standard = "openai/test-model"
+strong = "anthropic/test-large"
+fallbacks = ["openrouter/vendor/test-model", "codex/test-model"]
+max_daily_usd = 5.0
+max_latency_ms = 30000
+
+[router.prices]
+"openai/test-model" = { input = 2.5, output = 10.0 }
+"anthropic/test-large" = { input = 3.0, output = 15.0 }
+```
+
 ## Modos de Swarm por equipos
 
 | Modo | Comando | Qué hace |

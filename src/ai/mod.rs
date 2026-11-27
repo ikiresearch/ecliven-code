@@ -1,3 +1,4 @@
+pub mod adaptive;
 pub mod anthropic;
 pub mod cli_backend;
 pub mod cli_events;

@@ -2133,7 +2133,8 @@ impl App {
                 match arg1 {
                     Some("on") => self.config.router.enabled = true,
                     Some("off") => self.config.router.enabled = false,
-                    Some(_) => return self.push_error("Usage: /router [on|off]"),
+                    Some("reset") => crate::ai::adaptive::StatsStore::shared().reset(),
+                    Some(_) => return self.push_error("Usage: /router [on|off|reset]"),
                     None => {}
                 }
                 let r = &self.config.router;
@@ -2147,6 +2148,29 @@ impl App {
                 );
                 for (name, model) in &r.specialties {
                     msg.push_str(&format!("\n  {name}: {model}"));
+                }
+                let stats = crate::ai::adaptive::StatsStore::shared();
+                msg.push_str(&format!(
+                    "\n  adaptive: {}  fallbacks: {}\n  spent: ${:.4} this session, ${:.4} today",
+                    if r.is_adaptive() { "on" } else { "off" },
+                    if r.fallbacks.is_empty() { "-".to_string() } else { r.fallbacks.join(" -> ") },
+                    stats.spent_session(),
+                    stats.spent_today()
+                ));
+                if let Some(m) = r.max_session_usd {
+                    msg.push_str(&format!(" (session max ${m:.2})"));
+                }
+                if let Some(m) = r.max_daily_usd {
+                    msg.push_str(&format!(" (daily max ${m:.2})"));
+                }
+                let now = crate::ai::adaptive::now_secs();
+                for (label, s) in stats.snapshot() {
+                    let rate = s.success_rate().map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "-".into());
+                    let cool = if s.cooling(now) { format!(", cooling {}s", s.cooldown_until - now) } else { String::new() };
+                    msg.push_str(&format!(
+                        "\n  {label}: {} calls, ok {rate}, {:.0} ms avg, {} rate-limited, ${:.4}{cool}",
+                        s.calls, s.latency_ms_avg, s.rate_limited, s.cost_usd
+                    ));
                 }
                 if r.cheap.is_none() && r.standard.is_none() && r.strong.is_none() {
                     msg.push_str("\nConfigure [router] in .ecliven.toml with provider/model refs.");
