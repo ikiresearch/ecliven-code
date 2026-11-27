@@ -1,6 +1,7 @@
 pub mod app;
 pub mod eclipse;
 pub mod keybindings;
+pub mod mouse;
 pub mod onboarding;
 pub mod theme;
 pub mod ui;
@@ -10,7 +11,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
-    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+    DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseButton,
+    MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -106,6 +108,7 @@ async fn event_loop(
             maybe_ui_event = ui_rx.recv() => {
                 if let Some(ev) = maybe_ui_event {
                     app.handle_ui_event(ev);
+                    app.dispatch_next_queued(ui_tx.clone()).await;
                 }
             }
             maybe_term_event = reader.next() => {
@@ -157,6 +160,15 @@ async fn event_loop(
                             Action::CloseModal => app.close_modals(),
                             Action::ApproveYes => app.resolve_approval(true),
                             Action::ApproveNo => app.resolve_approval(false),
+                            Action::QuestionUp => app.question_up(),
+                            Action::QuestionDown => app.question_down(),
+                            Action::QuestionToggle => app.question_toggle(),
+                            Action::QuestionConfirm => app.question_confirm(),
+                            Action::QuestionCancel => app.question_cancel(),
+                            Action::QuestionDigit(idx) => app.question_digit(idx),
+                            Action::QuestionInputChar(c) => app.question_input_char(c),
+                            Action::QuestionInputBackspace => app.question_input_backspace(),
+                            Action::QuestionFocusOptions => app.question_focus_options(),
                             Action::OnboardingConfirm => app.onboarding_confirm(),
                             Action::OnboardingCancel => app.onboarding_cancel(),
                             Action::OnboardingUp => app.onboarding_up(),
@@ -172,8 +184,11 @@ async fn event_loop(
                         }
                     }
                     Some(Ok(Event::Mouse(mouse))) => match mouse.kind {
-                        MouseEventKind::ScrollUp => app.scroll_up(3),
-                        MouseEventKind::ScrollDown => app.scroll_down(3),
+                        MouseEventKind::ScrollUp => app.handle_mouse_scroll(true),
+                        MouseEventKind::ScrollDown => app.handle_mouse_scroll(false),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            app.handle_mouse_click(mouse.column, mouse.row, ui_tx.clone());
+                        }
                         _ => {}
                     },
                     Some(Err(_)) | None => break,

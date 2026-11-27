@@ -23,7 +23,8 @@ pub fn build_system_prompt(workspace_root: &Path) -> String {
          3. Never fabricate file contents or command output; always verify with tools.\n\
          4. After modifying code, run relevant build/test commands with run_command when helpful.\n\
          5. Keep responses concise, accurate, and easy to scan in a terminal.\n\
-         6. Subdirectories may contain their own AGENTS.md; read it before editing files there.",
+         6. Subdirectories may contain their own AGENTS.md; read it before editing files there.\n\
+         7. When requirements are genuinely ambiguous or a real decision is needed, use ask_user with concise options (the user can pick or type a custom answer). Do not ask things you can verify yourself.",
         workspace_root.display()
     );
     let files = crate::agent::instructions::load_project_instructions(workspace_root);

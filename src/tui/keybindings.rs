@@ -8,6 +8,8 @@ pub enum ModalState {
     OnboardingWorkspace,
     OnboardingWorkspaceInput,
     Approval,
+    Question,
+    QuestionInput,
     SwarmHub,
     ModelPicker,
     Help,
@@ -51,6 +53,15 @@ pub enum Action {
     CloseModal,
     ApproveYes,
     ApproveNo,
+    QuestionUp,
+    QuestionDown,
+    QuestionToggle,
+    QuestionConfirm,
+    QuestionCancel,
+    QuestionDigit(usize),
+    QuestionInputChar(char),
+    QuestionInputBackspace,
+    QuestionFocusOptions,
     OnboardingConfirm,
     OnboardingCancel,
     OnboardingUp,
@@ -125,6 +136,33 @@ pub fn map_key(key: KeyEvent, modal: ModalState) -> Action {
             (KeyCode::Char('q'), KeyModifiers::CONTROL) => Action::Quit,
             (KeyCode::PageUp, _) => Action::ScrollUp,
             (KeyCode::PageDown, _) => Action::ScrollDown,
+            _ => Action::None,
+        },
+        ModalState::Question => match (key.code, key.modifiers) {
+            (KeyCode::Up, _) => Action::QuestionUp,
+            (KeyCode::Down, _) => Action::QuestionDown,
+            (KeyCode::Char(' '), KeyModifiers::NONE) => Action::QuestionToggle,
+            (KeyCode::Enter, KeyModifiers::NONE) => Action::QuestionConfirm,
+            (KeyCode::Esc, _) => Action::QuestionCancel,
+            (KeyCode::Char('q'), KeyModifiers::CONTROL) => Action::Quit,
+            (KeyCode::Char(c @ '1'..='9'), KeyModifiers::NONE) => {
+                Action::QuestionDigit((c as u8 - b'1') as usize)
+            }
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                Action::QuestionInputChar(c)
+            }
+            (KeyCode::Backspace, _) => Action::QuestionInputBackspace,
+            _ => Action::None,
+        },
+        ModalState::QuestionInput => match (key.code, key.modifiers) {
+            (KeyCode::Enter, KeyModifiers::NONE) => Action::QuestionConfirm,
+            (KeyCode::Esc, _) => Action::QuestionFocusOptions,
+            (KeyCode::Up, _) => Action::QuestionFocusOptions,
+            (KeyCode::Backspace, _) => Action::QuestionInputBackspace,
+            (KeyCode::Char('q'), KeyModifiers::CONTROL) => Action::Quit,
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                Action::QuestionInputChar(c)
+            }
             _ => Action::None,
         },
         ModalState::SwarmHub => match (key.code, key.modifiers) {
