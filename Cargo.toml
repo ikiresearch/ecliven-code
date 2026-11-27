@@ -25,7 +25,7 @@ dirs = "5.0"
 dotenvy = "0.15"
 futures = "0.3"
 globset = "0.4"
-ratatui = "0.29"
+ratatui = "0.30"
 regex = "1.11"
 rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.10"
