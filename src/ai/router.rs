@@ -46,7 +46,7 @@ pub fn build_provider_for(
     build_provider(&cfg)
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct RouterConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -56,6 +56,38 @@ pub struct RouterConfig {
     /// Specialty (security, frontend, backend, data, tests, docs, devops) -> model.
     #[serde(default)]
     pub specialties: BTreeMap<String, String>,
+    /// Learn from real calls and skip unhealthy models (default true).
+    pub adaptive: Option<bool>,
+    /// Tried in order after the routed model on 429, outages or context overflow.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
+    pub max_session_usd: Option<f64>,
+    pub max_daily_usd: Option<f64>,
+    /// Models whose average latency exceeds this are skipped when others exist.
+    pub max_latency_ms: Option<u64>,
+    /// `provider/model` -> USD per million input/output tokens, for budgets.
+    #[serde(default)]
+    pub prices: BTreeMap<String, crate::ai::adaptive::Price>,
+}
+
+impl RouterConfig {
+    pub fn is_adaptive(&self) -> bool {
+        self.adaptive.unwrap_or(true)
+    }
+
+    pub fn budget(&self) -> crate::ai::adaptive::Budget {
+        crate::ai::adaptive::Budget {
+            max_session_usd: self.max_session_usd,
+            max_daily_usd: self.max_daily_usd,
+        }
+    }
+
+    fn usable(&self, raw: &str) -> bool {
+        !self.is_adaptive()
+            || ModelRef::parse(raw).is_ok_and(|m| {
+                crate::ai::adaptive::StatsStore::shared().healthy(&m.label(), self.max_latency_ms)
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -262,7 +294,8 @@ fn tier_model(router: &RouterConfig, tier: Difficulty) -> Option<&String> {
             router.cheap.as_ref(),
         ],
     };
-    order.iter().flatten().next().copied()
+    let all: Vec<&String> = order.iter().flatten().copied().collect();
+    all.iter().find(|m| router.usable(m)).or(all.first()).copied()
 }
 
 /// Picks a model for `prompt`. Returns `None` when neither the router nor saver
@@ -273,7 +306,8 @@ pub fn route(config: &AppConfig, prompt: &str) -> Option<RouteDecision> {
         return None;
     }
     let (difficulty, specialty) = classify(prompt);
-    let tier = if config.saver_mode {
+    let tight = router.budget().nearly_exhausted(&crate::ai::adaptive::StatsStore::shared());
+    let tier = if config.saver_mode || tight {
         difficulty.cheaper()
     } else {
         difficulty
@@ -287,6 +321,7 @@ pub fn route(config: &AppConfig, prompt: &str) -> Option<RouteDecision> {
     } else if let Some(m) = specialty
         .filter(|_| tier != Difficulty::Simple)
         .and_then(|s| router.specialties.get(s))
+        .filter(|m| router.usable(m))
     {
         (
             m,
@@ -299,6 +334,8 @@ pub fn route(config: &AppConfig, prompt: &str) -> Option<RouteDecision> {
     } else {
         let saver = if config.saver_mode {
             " (saver: one tier cheaper)"
+        } else if tight {
+            " (budget nearly spent: one tier cheaper)"
         } else {
             ""
         };
@@ -325,6 +362,14 @@ pub fn select_provider(
     config: &AppConfig,
     prompt: &str,
 ) -> Result<(Arc<dyn LlmProvider>, Option<String>), AiError> {
+    let router = &config.router;
+    let wrap = router.enabled
+        || !router.fallbacks.is_empty()
+        || router.max_session_usd.is_some()
+        || router.max_daily_usd.is_some();
+    if wrap {
+        return adaptive_chain(config, route(config, prompt));
+    }
     if let Some(decision) = route(config, prompt) {
         match build_provider_for(config, &decision.model) {
             Ok(provider) => {
@@ -345,6 +390,53 @@ pub fn select_provider(
 }
 
 /// Providers for Swarm workers (round-robin over `[swarm].workers`) and the lead.
+/// Routed model first, then stronger tiers (escalation), configured fallbacks
+/// and the active model, wrapped in an [`AdaptiveProvider`](crate::ai::adaptive::AdaptiveProvider).
+fn adaptive_chain(
+    config: &AppConfig,
+    decision: Option<RouteDecision>,
+) -> Result<(Arc<dyn LlmProvider>, Option<String>), AiError> {
+    use crate::ai::adaptive::{AdaptiveProvider, Candidate, StatsStore};
+    let router = &config.router;
+    let active = ModelRef {
+        provider: config.active_provider,
+        model: config.active_settings().model.clone(),
+    };
+    let mut note = decision
+        .as_ref()
+        .map(|d| format!("Router: {} ({})", d.model.label(), d.reason));
+    let mut refs = vec![decision.map(|d| d.model).unwrap_or_else(|| active.clone())];
+    if router.enabled {
+        refs.extend([&router.standard, &router.strong].into_iter().flatten().filter_map(|r| ModelRef::parse(r).ok()));
+    }
+    refs.extend(router.fallbacks.iter().filter_map(|r| ModelRef::parse(r).ok()));
+    refs.push(active);
+    let mut chain: Vec<Candidate> = Vec::new();
+    for r in refs {
+        let label = r.label();
+        if chain.iter().any(|c| c.label == label) {
+            continue;
+        }
+        match build_provider_for(config, &r) {
+            Ok(provider) => chain.push(Candidate { price: router.prices.get(&label).copied(), label, provider }),
+            Err(err) if chain.is_empty() => {
+                note = Some(format!("Router picked {label} but it is unavailable ({err})."));
+            }
+            Err(_) => {}
+        }
+    }
+    if chain.is_empty() {
+        return Ok((build_provider(config)?, note));
+    }
+    if chain.len() > 1 {
+        let rest: Vec<&str> = chain[1..].iter().map(|c| c.label.as_str()).collect();
+        let base = note.unwrap_or_else(|| format!("Model: {}", chain[0].label));
+        note = Some(format!("{base}; fallback: {}", rest.join(" -> ")));
+    }
+    let provider = AdaptiveProvider::new(chain, StatsStore::shared(), router.budget());
+    Ok((Arc::new(provider), note))
+}
+
 pub struct SwarmProviders {
     pub workers: Vec<Arc<dyn LlmProvider>>,
     pub lead: Option<Arc<dyn LlmProvider>>,
@@ -395,6 +487,7 @@ mod tests {
                 "security".to_string(),
                 "openrouter/test/sec-model".to_string(),
             )]),
+            ..Default::default()
         };
         cfg
     }
@@ -457,5 +550,28 @@ mod tests {
         assert_eq!(p.workers[1].model(), "b");
         assert_eq!(p.lead.unwrap().model(), "lead");
         assert_eq!(p.errors.len(), 1);
+    }
+
+    #[test]
+    fn adaptive_router_parses_budgets_and_builds_a_fallback_chain() {
+        let toml_src = r#"
+enabled = true
+cheap = "ollama/test-small"
+strong = "ollama/test-large"
+fallbacks = ["ollama/test-backup"]
+max_daily_usd = 5.0
+[prices]
+"ollama/test-large" = { input = 3.0, output = 15.0 }
+"#;
+        let router: RouterConfig = toml::from_str(toml_src).unwrap();
+        assert!(router.is_adaptive());
+        assert_eq!(router.budget().max_daily_usd, Some(5.0));
+        assert_eq!(router.prices["ollama/test-large"].output, 15.0);
+        let mut cfg = config();
+        cfg.router = router;
+        let (provider, note) = select_provider(&cfg, "rename this variable").unwrap();
+        let note = note.unwrap();
+        assert!(note.contains("fallback:") && note.contains("ollama/test-backup"), "{note}");
+        assert_eq!(provider.model(), "test-small");
     }
 }
