@@ -1288,7 +1288,7 @@ Slash Commands:
   /swarm security defense [folder] | /swarm security threat [folder]
   /swarm competitive | collaborative | red-eclipse [folder]
   /swarm off | /scope <folder|off>
-  /update [check] | /provider <name> | /model <name>
+  /update [check] | /provider <name> | /model <connector/model>
   /approval <ask|auto-edit|auto-all> | /status | /clear | /quit
 
 Press F1 or Esc to close.";

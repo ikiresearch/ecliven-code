@@ -121,7 +121,7 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/setup` | `/folder` | `/telemetry <on|off>`
 - `/update [check]`
 - `/provider <nombre>`
-- `/model <nombre-del-modelo>`
+- `/model <conector/modelo>` (por ejemplo `/model codex/gpt-5` o `/model opencode/model1`) cambia de conector y modelo a la vez; `/model <modelo>` cambia solo el modelo del conector activo. En OpenRouter, `openai/gpt-4o` sigue siendo un modelo de OpenRouter.
 - `/approval <ask|auto-edit|auto-all>`
 - `/sandbox [read-only|workspace-write|danger-full-access]`
 - `/compact`

@@ -1976,11 +1976,8 @@ impl App {
             },
             "/model" | "/models" => match arg1 {
                 Some(model) => {
-                    self.config.set_model(model);
-                    let msg = format!(
-                        "Active model for {} set to '{}'.",
-                        self.config.active_provider, model
-                    );
+                    self.config.set_model_ref(model);
+                    let msg = format!("Active model: {}", self.config.active_model_label());
                     self.active_state_mut().entries.push(ChatEntry::System(msg));
                 }
                 None => {

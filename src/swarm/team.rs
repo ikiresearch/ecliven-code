@@ -159,7 +159,10 @@ impl SwarmEngine {
         if self.worker_providers.is_empty() {
             role.name.to_string()
         } else {
-            format!("{} [{}]", role.name, self.worker_provider(idx).model())
+            {
+            let p = self.worker_provider(idx);
+            format!("{} [{}/{}]", role.name, p.name(), p.model())
+        }
         }
     }
 
