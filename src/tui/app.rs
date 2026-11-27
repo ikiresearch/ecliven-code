@@ -1121,6 +1121,16 @@ impl App {
         }
     }
 
+    pub fn complete_input(&mut self) {
+        if self.cursor_pos != self.input.len() {
+            return;
+        }
+        if let Some(done) = crate::tui::complete::complete(&self.input) {
+            self.input = done;
+            self.cursor_pos = self.input.len();
+        }
+    }
+
     pub fn insert_char(&mut self, c: char) {
         self.input.insert(self.cursor_pos, c);
         self.cursor_pos += c.len_utf8();

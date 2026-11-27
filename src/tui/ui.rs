@@ -154,6 +154,7 @@ fn render_landing(frame: &mut Frame<'_>, app: &App, area: Rect, update_height: u
     let input_x = center_area.x + center_area.width.saturating_sub(input_width) / 2;
     let input_rect = Rect::new(input_x, rows[6].y, input_width, rows[6].height);
     render_input_box(frame, app, input_rect, true);
+    render_suggestions(frame, app, input_rect);
 
     let sub_hint = if let Some(hint) = app.missing_key_hint() {
         Line::from(Span::styled(format!("! {hint}"), Theme::status_running()))
@@ -202,6 +203,7 @@ fn render_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect, update_hei
     }
 
     render_input_box(frame, app, chunks[3], false);
+    render_suggestions(frame, app, chunks[3]);
     render_footer(frame, app, chunks[4]);
 }
 
@@ -613,6 +615,47 @@ fn render_swarm_sidebar(frame: &mut Frame<'_>, app: &App, domain: SwarmDomain, a
         .block(block)
         .wrap(Wrap { trim: false });
     frame.render_widget(panel, area);
+}
+
+fn render_suggestions(frame: &mut Frame<'_>, app: &App, input: Rect) {
+    if app.is_busy || app.cursor_pos != app.input.len() {
+        return;
+    }
+    let found = crate::tui::complete::suggestions(&app.input);
+    if found.is_empty() || (found.len() == 1 && found[0].0 == app.input.trim_end()) {
+        return;
+    }
+    let shown = found.len().min(8);
+    let height = shown as u16 + 2;
+    if input.y < height {
+        return;
+    }
+    let area = Rect::new(input.x, input.y - height, input.width.min(72), height);
+    let mut lines: Vec<Line> = found
+        .iter()
+        .take(shown)
+        .map(|(c, h)| {
+            Line::from(vec![
+                Span::styled(format!("{c:<24}"), Theme::text_primary()),
+                Span::styled(h.to_string(), Theme::placeholder()),
+            ])
+        })
+        .collect();
+    if found.len() > shown {
+        lines.pop();
+        lines.push(Line::from(Span::styled(format!("… {} more", found.len() - shown + 1), Theme::placeholder())));
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Theme::border_inactive())
+                .title(" Tab to complete "),
+        ),
+        area,
+    );
 }
 
 fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bool) {

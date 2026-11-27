@@ -1,4 +1,5 @@
 pub mod app;
+pub mod complete;
 pub mod eclipse;
 pub mod keybindings;
 pub mod onboarding;
@@ -119,6 +120,7 @@ async fn event_loop(
                             Action::Submit => app.submit_input(ui_tx.clone()).await,
                             Action::InsertNewline => app.insert_char('\n'),
                             Action::InsertChar(c) => app.insert_char(c),
+                            Action::Complete => app.complete_input(),
                             Action::Backspace => app.backspace(),
                             Action::Delete => app.delete_char(),
                             Action::MoveLeft => app.move_left(),

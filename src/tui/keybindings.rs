@@ -21,6 +21,7 @@ pub enum Action {
     Submit,
     InsertNewline,
     InsertChar(char),
+    Complete,
     Backspace,
     Delete,
     MoveLeft,
@@ -166,6 +167,7 @@ pub fn map_key(key: KeyEvent, modal: ModalState) -> Action {
                 Action::InsertNewline
             }
             (KeyCode::Enter, KeyModifiers::NONE) => Action::Submit,
+            (KeyCode::Tab, KeyModifiers::NONE) => Action::Complete,
             (KeyCode::Backspace, _) => Action::Backspace,
             (KeyCode::Delete, _) => Action::Delete,
             (KeyCode::Left, _) => Action::MoveLeft,
