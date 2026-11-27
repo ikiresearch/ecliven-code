@@ -2,6 +2,14 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [versionado semántico](https://semver.org/lang/es/).
 
+## [0.4.2] - 2026-11-27
+
+### Añadido
+
+- Herramienta `ask_user`: el agente puede preguntar cuando tiene dudas con opciones de selección única o múltiple y un campo de respuesta libre. En CLI pregunta por consola; en Swarm autónomo continúa sin bloquearse.
+- Cola de mensajes de seguimiento: puedes escribir y pulsar `Enter` mientras el agente trabaja para encolar mensajes que se ejecutan en orden al terminar el turno, con barra de cola, `[Clear queue]` y `/queue [clear|pop]`.
+- Soporte de mouse en la terminal: clic en opciones de preguntas, botones de aprobación (`Approve` / `Deny`), pestañas de la barra superior, selector de modelos, Swarm Hub, asistente inicial y `[Clear queue]`, además de rueda del mouse en listas e historial.
+
 ## [0.4.1] - 2026-11-27
 
 ### Añadido
@@ -44,5 +52,6 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Las sesiones guardadas informan los errores de escritura en lugar de ignorarlos.
 - Corregido el truncado de texto UTF-8 en la salida de herramientas.
 
+[0.4.2]: https://github.com/ikiresearch/ecliven-code/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/ikiresearch/ecliven-code/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ikiresearch/ecliven-code/compare/v0.3.0...v0.4.0
