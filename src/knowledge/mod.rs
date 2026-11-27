@@ -6,8 +6,10 @@
 pub mod brief;
 pub mod commands;
 pub mod embed;
+pub mod graph;
 pub mod indexer;
 pub mod memory;
+pub mod syntax;
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -46,6 +48,22 @@ CREATE TABLE IF NOT EXISTS relations (
 );
 CREATE INDEX IF NOT EXISTS relations_path ON relations(path);
 CREATE INDEX IF NOT EXISTS relations_target ON relations(target);
+CREATE TABLE IF NOT EXISTS refs (
+    path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    line INTEGER NOT NULL,
+    caller TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS refs_name ON refs(name);
+CREATE INDEX IF NOT EXISTS refs_caller ON refs(caller);
+CREATE INDEX IF NOT EXISTS refs_path ON refs(path);
+CREATE TABLE IF NOT EXISTS file_deps (
+    path TEXT NOT NULL,
+    dep TEXT NOT NULL,
+    PRIMARY KEY (path, dep)
+);
+CREATE INDEX IF NOT EXISTS file_deps_dep ON file_deps(dep);
 CREATE TABLE IF NOT EXISTS chunks (
     id INTEGER PRIMARY KEY,
     path TEXT NOT NULL,
@@ -160,6 +178,20 @@ impl KnowledgeStore {
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
             .map_err(err)?;
         conn.execute_batch(SCHEMA).map_err(err)?;
+        let has_end: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('symbols') WHERE name = 'end_line'",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        if !has_end {
+            conn.execute_batch(
+                "ALTER TABLE symbols ADD COLUMN end_line INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE symbols ADD COLUMN parent TEXT NOT NULL DEFAULT '';",
+            )
+            .map_err(err)?;
+        }
         Ok(Self {
             conn,
             workspace: workspace
@@ -177,7 +209,8 @@ impl KnowledgeStore {
         self.conn
             .execute_batch(
                 "DELETE FROM files; DELETE FROM symbols; DELETE FROM relations;
-                 DELETE FROM chunks; DELETE FROM chunks_fts;",
+                 DELETE FROM chunks; DELETE FROM chunks_fts;
+                 DELETE FROM refs; DELETE FROM file_deps;",
             )
             .map_err(err)
     }

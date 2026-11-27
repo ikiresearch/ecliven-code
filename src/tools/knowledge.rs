@@ -150,7 +150,7 @@ impl Tool for FindSymbolTool {
             if syms.is_empty() {
                 return Ok(ToolOutput::ok(format!("No indexed symbols in {path}.")));
             }
-            let out: Vec<String> = syms.iter().map(|s| format!("{}: {} {}", s.line, s.kind, s.signature)).collect();
+            let out: Vec<String> = syms.iter().map(|s| format!("{}  {}", s.render(), s.signature)).collect();
             return Ok(ToolOutput::ok(out.join("\n")));
         }
         let name = str_arg(args, "name")
@@ -165,7 +165,7 @@ impl Tool for FindSymbolTool {
                 out.push(format!("No definition named '{name}' in the index."));
             }
             for d in &defs {
-                out.push(format!("def {}:{} {} {}", d.path, d.line, d.kind, d.signature));
+                out.push(format!("def {}  {}", d.render(), d.signature));
             }
             if refs {
                 for (path, target) in s.importers(&name, limit)? {
@@ -336,5 +336,293 @@ impl Tool for UpdatePlanTool {
             task.goal,
             task.render_plan()
         )))
+    }
+}
+
+fn name_arg(args: &Value) -> Result<String, ToolError> {
+    str_arg(args, "name")
+        .map(str::to_string)
+        .ok_or_else(|| ToolError::InvalidArgs("missing 'name'".into()))
+}
+
+pub struct ReadSymbolTool;
+
+#[async_trait]
+impl Tool for ReadSymbolTool {
+    fn name(&self) -> &str {
+        "read_symbol"
+    }
+
+    fn description(&self) -> &str {
+        "Read only the source of one function, method, type or class (by name, optionally `Type::method` or with 'path'), instead of the whole file. Cheaper than read_file for large files."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Symbol name, or Parent::name" },
+                "path": { "type": "string", "description": "Workspace-relative file to disambiguate" }
+            },
+            "required": ["name"]
+        })
+    }
+
+    fn risk_level(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError> {
+        let name = name_arg(args)?;
+        let path = str_arg(args, "path").map(|p| p.trim_start_matches("./").replace('\\', "/"));
+        let root = ctx.workspace_root.clone();
+        let report = with_store(ctx, true, move |s| {
+            let defs = s.definitions(&name, path.as_deref(), 3)?;
+            if defs.is_empty() {
+                return Ok(format!("No definition named '{name}'. Try find_symbol for prefix matches."));
+            }
+            let mut out = Vec::new();
+            for d in defs {
+                let text = std::fs::read_to_string(root.join(&d.path)).map_err(|e| e.to_string())?;
+                let end = if d.end_line > d.line { d.end_line } else { d.line + 40 };
+                let body: Vec<String> = text
+                    .lines()
+                    .enumerate()
+                    .skip(d.line.saturating_sub(1) as usize)
+                    .take((end - d.line + 1).min(400) as usize)
+                    .map(|(i, l)| format!("{:>5} {l}", i + 1))
+                    .collect();
+                out.push(format!("{}\n{}", d.render(), body.join("\n")));
+            }
+            Ok(out.join("\n\n"))
+        })
+        .await?;
+        Ok(ToolOutput::ok(report))
+    }
+}
+
+pub struct FindReferencesTool;
+
+#[async_trait]
+impl Tool for FindReferencesTool {
+    fn name(&self) -> &str {
+        "find_references"
+    }
+
+    fn description(&self) -> &str {
+        "List where a function is called or a type is used, with the enclosing function of each site (parsed for Rust, Python, JS/TS and Go; text matches elsewhere)."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Function, method or type name" },
+                "kind": { "type": "string", "enum": ["call", "type"], "description": "Only calls or only type uses" },
+                "limit": { "type": "integer" }
+            },
+            "required": ["name"]
+        })
+    }
+
+    fn risk_level(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError> {
+        let name = name_arg(args)?;
+        let short = name.rsplit([':', '.']).next().unwrap_or(&name).to_string();
+        let kind = str_arg(args, "kind").map(str::to_string);
+        let limit = limit_arg(args, ctx, 30);
+        let report = with_store(ctx, true, move |s| {
+            let refs = s.references(&short, kind.as_deref(), limit)?;
+            if refs.is_empty() {
+                let hits = s.search_text(&short, limit.min(10), 8)?;
+                if hits.is_empty() {
+                    return Ok(format!("No references to '{short}'."));
+                }
+                let lines: Vec<String> = hits.iter().map(|h| format!("text {}:{}-{}  {}", h.path, h.start_line, h.end_line, h.snippet)).collect();
+                return Ok(format!("No parsed references; text matches:\n{}", lines.join("\n")));
+            }
+            let lines: Vec<String> = refs
+                .iter()
+                .map(|r| {
+                    let inside = if r.caller.is_empty() { String::new() } else { format!(" in {}", r.caller) };
+                    format!("{} {}:{}{inside}", r.kind, r.path, r.line)
+                })
+                .collect();
+            Ok(format!("{} reference(s) to '{short}':\n{}", refs.len(), lines.join("\n")))
+        })
+        .await?;
+        Ok(ToolOutput::ok(report))
+    }
+}
+
+pub struct CallGraphTool;
+
+#[async_trait]
+impl Tool for CallGraphTool {
+    fn name(&self) -> &str {
+        "call_graph"
+    }
+
+    fn description(&self) -> &str {
+        "Show who calls a function (callers) and what it calls (callees), up to 3 levels. Names are matched by identifier, so same-named functions in different files are merged."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "Function or method name" },
+                "direction": { "type": "string", "enum": ["callers", "callees", "both"] },
+                "depth": { "type": "integer", "description": "1-3, default 1" }
+            },
+            "required": ["name"]
+        })
+    }
+
+    fn risk_level(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError> {
+        let name = name_arg(args)?;
+        let name = name.rsplit([':', '.']).next().unwrap_or(&name).to_string();
+        let direction = str_arg(args, "direction").unwrap_or("both").to_string();
+        let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(1).clamp(1, 3) as usize;
+        let per_level = if ctx.knowledge.saver { 8 } else { 15 };
+        let report = with_store(ctx, true, move |s| {
+            let mut out = Vec::new();
+            if direction != "callees" {
+                out.push(format!("Callers of {name}:"));
+                let mut frontier = vec![name.clone()];
+                let mut seen = std::collections::HashSet::from([name.clone()]);
+                for level in 1..=depth {
+                    let mut next = Vec::new();
+                    for f in &frontier {
+                        for r in s.references(f, Some("call"), per_level)? {
+                            let who = if r.caller.is_empty() { "<top level>".to_string() } else { r.caller.clone() };
+                            out.push(format!("{}{} ({}:{}) -> {f}", "  ".repeat(level), who, r.path, r.line));
+                            if !r.caller.is_empty() && seen.insert(r.caller.clone()) {
+                                next.push(r.caller);
+                            }
+                        }
+                    }
+                    frontier = next;
+                }
+            }
+            if direction != "callers" {
+                out.push(format!("Callees of {name}:"));
+                let mut frontier = vec![name.clone()];
+                let mut seen = std::collections::HashSet::from([name.clone()]);
+                for level in 1..=depth {
+                    let mut next = Vec::new();
+                    for f in &frontier {
+                        for (callee, path, line) in s.callees(f, per_level)? {
+                            let defined = s
+                                .definitions(&callee, None, 1)?
+                                .first()
+                                .map(|d| format!(" [def {}:{}]", d.path, d.line))
+                                .unwrap_or_default();
+                            out.push(format!("{}{f} -> {callee} ({path}:{line}){defined}", "  ".repeat(level)));
+                            if seen.insert(callee.clone()) {
+                                next.push(callee);
+                            }
+                        }
+                    }
+                    frontier = next;
+                }
+            }
+            Ok(out.join("\n"))
+        })
+        .await?;
+        Ok(ToolOutput::ok(report))
+    }
+}
+
+pub struct ImpactTool;
+
+#[async_trait]
+impl Tool for ImpactTool {
+    fn name(&self) -> &str {
+        "impact"
+    }
+
+    fn description(&self) -> &str {
+        "Before changing a file or symbol, list the files that depend on it (via resolved imports and references) and the tests most likely affected."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Workspace-relative file" },
+                "name": { "type": "string", "description": "Symbol name (alternative to path)" },
+                "depth": { "type": "integer", "description": "Import levels to follow, 1-4, default 2" }
+            }
+        })
+    }
+
+    fn risk_level(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError> {
+        let path = str_arg(args, "path").map(|p| p.trim_start_matches("./").replace('\\', "/"));
+        let name = str_arg(args, "name").map(str::to_string);
+        if path.is_none() && name.is_none() {
+            return Err(ToolError::InvalidArgs("Pass 'path' or 'name'".into()));
+        }
+        let depth = args.get("depth").and_then(Value::as_u64).unwrap_or(2).clamp(1, 4) as usize;
+        let limit = limit_arg(args, ctx, 40);
+        let report = with_store(ctx, true, move |s| {
+            let mut targets: Vec<String> = path.into_iter().collect();
+            let mut users: Vec<String> = Vec::new();
+            if let Some(n) = &name {
+                for d in s.definitions(n, None, 5)? {
+                    if !targets.contains(&d.path) {
+                        targets.push(d.path);
+                    }
+                }
+                let short = n.rsplit([':', '.']).next().unwrap_or(n);
+                for r in s.references(short, None, 200)? {
+                    if !targets.contains(&r.path) && !users.contains(&r.path) {
+                        users.push(r.path);
+                    }
+                }
+            }
+            if targets.is_empty() {
+                return Ok("Nothing in the index matches; check the path or name.".to_string());
+            }
+            let mut out = vec![format!("Target: {}", targets.join(", "))];
+            let deps: Vec<String> = targets.iter().flat_map(|t| s.dependencies(t).unwrap_or_default()).collect();
+            if !deps.is_empty() {
+                out.push(format!("Depends on: {}", deps.join(", ")));
+            }
+            let mut dependents = s.dependents(&targets, depth, limit)?;
+            for u in users {
+                if !dependents.iter().any(|(p, _)| *p == u) {
+                    dependents.push((u, 1));
+                }
+            }
+            if dependents.is_empty() {
+                out.push("No dependents found in the index.".into());
+            } else {
+                let (tests, code): (Vec<_>, Vec<_>) =
+                    dependents.iter().partition(|(p, _)| crate::knowledge::graph::is_test_path(p));
+                if !code.is_empty() {
+                    out.push(format!("Dependents ({}):", code.len()));
+                    out.extend(code.iter().map(|(p, d)| format!("  {p} (distance {d})")));
+                }
+                if !tests.is_empty() {
+                    out.push(format!("Tests likely affected ({}):", tests.len()));
+                    out.extend(tests.iter().map(|(p, _)| format!("  {p}")));
+                }
+            }
+            Ok(out.join("\n"))
+        })
+        .await?;
+        Ok(ToolOutput::ok(report))
     }
 }
