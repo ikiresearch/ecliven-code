@@ -68,7 +68,7 @@ pub struct AgentEngine {
 }
 
 const KNOWLEDGE_DIRECTIVE: &str = "\n\nProject knowledge: each user message may end with a <project_context> brief (active task, git state, memories with provenance, index hints). \
-Prefer code_search and find_symbol over reading whole files, memory_search to recall conventions, update_plan for multi-step tasks, and memory_save only for durable verified facts (cite source files). \
+Prefer code_search, find_symbol and read_symbol over reading whole files; use find_references and call_graph to follow usages, and impact before changing shared code to find dependents and affected tests; memory_search to recall conventions, update_plan for multi-step tasks, and memory_save only for durable verified facts (cite source files). \
 Index hints and stale memories can be outdated: read the current file before editing it.";
 
 const WORKFLOW_DIRECTIVE: &str = "\n\nWORKFLOW for every request: 1) recall applicable rules and context (brief, memory_search); 2) inspect the current files involved; \

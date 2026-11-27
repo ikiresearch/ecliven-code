@@ -14,7 +14,7 @@ use walkdir::{DirEntry, WalkDir};
 use super::{err, fts_query, hash_bytes, now, KResult, KnowledgeStore};
 
 /// Bump when extraction rules change so every file is re-parsed.
-pub const PARSER_VERSION: i64 = 1;
+pub const PARSER_VERSION: i64 = 2;
 const MAX_FILE_BYTES: u64 = 512 * 1024;
 const MAX_CHUNK_LINES: usize = 60;
 const MIN_CHUNK_LINES: usize = 8;
@@ -63,6 +63,25 @@ pub struct SymbolHit {
     pub kind: String,
     pub line: i64,
     pub signature: String,
+    pub end_line: i64,
+    pub parent: String,
+}
+
+impl SymbolHit {
+    /// `path:start-end kind Parent::name`
+    pub fn render(&self) -> String {
+        let name = if self.parent.is_empty() || self.kind == "impl" {
+            self.name.clone()
+        } else {
+            format!("{}::{}", self.parent, self.name)
+        };
+        let range = if self.end_line > self.line {
+            format!("{}-{}", self.line, self.end_line)
+        } else {
+            self.line.to_string()
+        };
+        format!("{}:{range} {} {name}", self.path, self.kind)
+    }
 }
 
 pub fn language_for(path: &Path) -> Option<&'static str> {
@@ -206,9 +225,19 @@ fn rules(language: &str) -> Option<&'static Rules> {
 
 const CONTROL_WORDS: &[&str] = &["if", "for", "while", "switch", "return", "else", "catch", "sizeof", "new", "delete"];
 
+pub(crate) struct ParsedSymbol {
+    pub name: String,
+    pub kind: &'static str,
+    pub line: i64,
+    pub end_line: i64,
+    pub parent: String,
+    pub signature: String,
+}
+
 pub(crate) struct Parsed {
-    pub symbols: Vec<(String, &'static str, i64, String)>,
+    pub symbols: Vec<ParsedSymbol>,
     pub imports: Vec<String>,
+    pub refs: Vec<super::syntax::SynRef>,
     pub chunks: Vec<(i64, i64, String)>,
 }
 
@@ -228,7 +257,14 @@ pub(crate) fn parse_file(language: &str, text: &str) -> Parsed {
                         continue;
                     }
                     let sig = crate::tools::truncate_str(line.trim(), 160).to_string();
-                    symbols.push((name, *kind, idx as i64 + 1, sig));
+                    symbols.push(ParsedSymbol {
+                        name,
+                        kind,
+                        line: idx as i64 + 1,
+                        end_line: idx as i64 + 1,
+                        parent: String::new(),
+                        signature: sig,
+                    });
                     break;
                 }
             }
@@ -240,7 +276,25 @@ pub(crate) fn parse_file(language: &str, text: &str) -> Parsed {
         }
     }
 
-    let starts: std::collections::HashSet<i64> = symbols.iter().map(|s| s.2).collect();
+    let mut refs = Vec::new();
+    if let Some(syn) = super::syntax::parse(language, text) {
+        symbols = syn
+            .symbols
+            .into_iter()
+            .map(|s| ParsedSymbol {
+                name: s.name,
+                kind: s.kind,
+                line: s.start,
+                end_line: s.end,
+                parent: s.parent,
+                signature: s.signature,
+            })
+            .collect();
+        refs = syn.refs;
+        imports.extend(syn.mod_decls);
+    }
+
+    let starts: std::collections::HashSet<i64> = symbols.iter().map(|s| s.line).collect();
     let mut chunks = Vec::new();
     let mut start = 0usize;
     for idx in 0..=lines.len() {
@@ -259,6 +313,7 @@ pub(crate) fn parse_file(language: &str, text: &str) -> Parsed {
     Parsed {
         symbols,
         imports,
+        refs,
         chunks,
     }
 }
@@ -375,10 +430,18 @@ impl KnowledgeStore {
                 params![rel, hash, language, PARSER_VERSION, size, mtime, now()],
             )
             .map_err(err)?;
-            for (name, kind, line, sig) in &parsed.symbols {
+            for s in &parsed.symbols {
                 tx.execute(
-                    "INSERT INTO symbols (path, name, kind, line, signature) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![rel, name, kind, line, sig],
+                    "INSERT INTO symbols (path, name, kind, line, signature, end_line, parent)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![rel, s.name, s.kind, s.line, s.signature, s.end_line, s.parent],
+                )
+                .map_err(err)?;
+            }
+            for r in &parsed.refs {
+                tx.execute(
+                    "INSERT INTO refs (path, name, line, caller, kind) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![rel, r.name, r.line, r.caller, r.kind],
                 )
                 .map_err(err)?;
             }
@@ -444,6 +507,16 @@ impl KnowledgeStore {
                     .map_err(err)?;
             }
         }
+        let deps_missing: bool = tx
+            .query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM file_deps) AND EXISTS (SELECT 1 FROM relations)",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(err)?;
+        if stats.changed() || deps_missing {
+            super::graph::rebuild_deps(&tx)?;
+        }
         if stats.changed() {
             tx.execute(
                 "DELETE FROM embeddings WHERE hash NOT IN (SELECT hash FROM chunks)",
@@ -492,27 +565,11 @@ impl KnowledgeStore {
 
     /// Definitions whose name matches exactly, then by prefix.
     pub fn find_symbols(&self, name: &str, limit: usize) -> KResult<Vec<SymbolHit>> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT path, name, kind, line, signature FROM symbols
-                 WHERE name = ?1 OR name LIKE ?2 ESCAPE '\\'
-                 ORDER BY (name = ?1) DESC, length(name), path LIMIT ?3",
-            )
-            .map_err(err)?;
         let escaped = name.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
-        let rows = stmt
-            .query_map(params![name, format!("{escaped}%"), limit as i64], |r| {
-                Ok(SymbolHit {
-                    path: r.get(0)?,
-                    name: r.get(1)?,
-                    kind: r.get(2)?,
-                    line: r.get(3)?,
-                    signature: r.get(4)?,
-                })
-            })
-            .map_err(err)?;
-        rows.collect::<Result<_, _>>().map_err(err)
+        self.symbol_rows(
+            "name = ?1 OR name LIKE ?2 ESCAPE '\\' ORDER BY (name = ?1) DESC, length(name), path LIMIT ?3",
+            &[&name, &format!("{escaped}%"), &(limit as i64)],
+        )
     }
 
     /// Files whose imports mention `needle` (module name or path fragment).
@@ -528,22 +585,7 @@ impl KnowledgeStore {
     }
 
     pub fn symbols_in(&self, rel: &str, limit: usize) -> KResult<Vec<SymbolHit>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT path, name, kind, line, signature FROM symbols WHERE path = ?1 ORDER BY line LIMIT ?2")
-            .map_err(err)?;
-        let rows = stmt
-            .query_map(params![rel, limit as i64], |r| {
-                Ok(SymbolHit {
-                    path: r.get(0)?,
-                    name: r.get(1)?,
-                    kind: r.get(2)?,
-                    line: r.get(3)?,
-                    signature: r.get(4)?,
-                })
-            })
-            .map_err(err)?;
-        rows.collect::<Result<_, _>>().map_err(err)
+        self.symbol_rows("path = ?1 ORDER BY line LIMIT ?2", &[&rel, &(limit as i64)])
     }
 }
 
@@ -553,7 +595,7 @@ fn delete_file_rows(tx: &rusqlite::Transaction<'_>, rel: &str) -> KResult<()> {
         params![rel],
     )
     .map_err(err)?;
-    for table in ["chunks", "symbols", "relations"] {
+    for table in ["chunks", "symbols", "relations", "refs"] {
         tx.execute(&format!("DELETE FROM {table} WHERE path = ?1"), params![rel])
             .map_err(err)?;
     }
@@ -568,7 +610,7 @@ mod tests {
     fn extracts_symbols_imports_and_chunks() {
         let src = "use crate::config::AppConfig;\n\npub struct Engine {\n    x: u32,\n}\n\nimpl Engine {\n    pub async fn run_turn(&self) {}\n}\n";
         let p = parse_file("rust", src);
-        let names: Vec<_> = p.symbols.iter().map(|s| (s.0.as_str(), s.1)).collect();
+        let names: Vec<_> = p.symbols.iter().map(|s| (s.name.as_str(), s.kind)).collect();
         assert!(names.contains(&("Engine", "struct")));
         assert!(names.contains(&("Engine", "impl")));
         assert!(names.contains(&("run_turn", "fn")));
@@ -578,8 +620,8 @@ mod tests {
         let ts = "import { x } from './util';\nexport const handler = async (req) => {\n};\nexport interface Props {}\n";
         let p = parse_file("typescript", ts);
         assert_eq!(p.imports, vec!["./util"]);
-        assert!(p.symbols.iter().any(|s| s.0 == "handler"));
-        assert!(p.symbols.iter().any(|s| s.0 == "Props" && s.1 == "interface"));
+        assert!(p.symbols.iter().any(|s| s.name == "handler"));
+        assert!(p.symbols.iter().any(|s| s.name == "Props" && s.kind == "interface"));
 
         let py = "from app.models import User\nclass Service:\n    def run(self):\n        if x:\n            pass\n";
         let p = parse_file("python", py);

@@ -258,6 +258,14 @@ para contenido nuevo.
 modo ahorro) con la tarea activa, Git, memorias relevantes y referencias `ruta:lineas`, nunca archivos enteros.
 
 **Herramientas del agente:** `code_search`, `find_symbol`, `memory_search`, `memory_save` y `update_plan`
+
+**Comprension de codigo:** Rust, Python, JavaScript/TypeScript y Go se analizan con tree-sitter (los demas lenguajes siguen con reglas ligeras). Cada simbolo guarda su rango de lineas y su contenedor (`Tipo::metodo`), y se indexan las llamadas (con la funcion que las hace) y los usos de tipos. Los imports se resuelven a archivos del workspace.
+
+- `read_symbol`: lee solo el cuerpo de una funcion o tipo, no el archivo entero.
+- `find_references`: donde se llama una funcion o se usa un tipo.
+- `call_graph`: quien llama a una funcion y a que llama, hasta 3 niveles.
+- `impact`: archivos que dependen de un archivo o simbolo y tests probablemente afectados.
+- El resumen de contexto incluye los archivos centrales del proyecto (PageRank sobre los imports), salvo en modo ahorro.
 (sin aprobacion: no modifican el repositorio). En la CLI: `ecliven index [--rebuild]`.
 
 **Workflow opcional** (`/workflow on`): recuperar contexto, inspeccionar archivos, planificar, aplicar

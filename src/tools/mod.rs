@@ -347,6 +347,10 @@ impl ToolRegistry {
     fn register_knowledge_tools(&mut self, writable: bool) {
         self.register(Arc::new(knowledge::CodeSearchTool));
         self.register(Arc::new(knowledge::FindSymbolTool));
+        self.register(Arc::new(knowledge::ReadSymbolTool));
+        self.register(Arc::new(knowledge::FindReferencesTool));
+        self.register(Arc::new(knowledge::CallGraphTool));
+        self.register(Arc::new(knowledge::ImpactTool));
         self.register(Arc::new(knowledge::MemorySearchTool));
         if writable {
             self.register(Arc::new(knowledge::MemorySaveTool));

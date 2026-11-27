@@ -12,6 +12,8 @@ pub struct BriefOptions {
     pub budget_tokens: usize,
     pub max_memories: usize,
     pub max_code_hits: usize,
+    /// Central files listed when nothing more specific fills the budget (0 = off).
+    pub repo_map: usize,
 }
 
 impl BriefOptions {
@@ -20,6 +22,7 @@ impl BriefOptions {
             budget_tokens: 1500,
             max_memories: 8,
             max_code_hits: 6,
+            repo_map: 5,
         }
     }
 
@@ -28,6 +31,7 @@ impl BriefOptions {
             budget_tokens: 600,
             max_memories: 4,
             max_code_hits: 3,
+            repo_map: 0,
         }
     }
 }
@@ -123,7 +127,7 @@ pub fn build_brief(
         .take(4)
     {
         for s in project.find_symbols(word, 2)? {
-            code.push(format!("- {}:{} {} {}", s.path, s.line, s.kind, s.name));
+            code.push(format!("- {}", s.render()));
         }
     }
     for hit in project.search_text(prompt, opts.max_code_hits, 6)? {
@@ -135,6 +139,14 @@ pub fn build_brief(
             if !b.push(line) {
                 break;
             }
+        }
+    }
+
+    if opts.repo_map > 0 {
+        let map = project.repo_map(opts.repo_map)?;
+        if !map.is_empty() && b.push("Central files (most imported):".into()) {
+            let names: Vec<String> = map.into_iter().map(|(p, _)| p).collect();
+            b.push(format!("- {}", names.join(", ")));
         }
     }
 
