@@ -338,3 +338,47 @@ impl Tool for UpdatePlanTool {
         )))
     }
 }
+
+pub struct LoadSkillTool;
+
+#[async_trait]
+impl Tool for LoadSkillTool {
+    fn name(&self) -> &str {
+        "load_skill"
+    }
+
+    fn description(&self) -> &str {
+        "Load the full instructions of a skill listed in the system prompt. Call it before working on a task that matches the skill's description."
+    }
+
+    fn input_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "name": { "type": "string", "description": "Skill name from the list" } },
+            "required": ["name"]
+        })
+    }
+
+    fn risk_level(&self) -> ToolRisk {
+        ToolRisk::ReadOnly
+    }
+
+    async fn execute(&self, ctx: &ToolContext, args: &Value) -> Result<ToolOutput, ToolError> {
+        let name = str_arg(args, "name")
+            .ok_or_else(|| ToolError::InvalidArgs("missing 'name'".into()))?
+            .to_string();
+        let root = ctx.workspace_root.clone();
+        let found = tokio::task::spawn_blocking(move || crate::agent::skills::load_body(&root, &name))
+            .await
+            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        match found {
+            Some((skill, body)) => Ok(ToolOutput::ok(format!(
+                "Skill '{}' ({}):\n\n{}",
+                skill.name,
+                skill.path.display(),
+                body
+            ))),
+            None => Err(ToolError::InvalidArgs("unknown skill; see the skills list in the system prompt".into())),
+        }
+    }
+}

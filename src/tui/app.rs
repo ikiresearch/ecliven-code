@@ -1736,6 +1736,19 @@ impl App {
         let arg3 = parts.next();
 
         match cmd {
+            "/skills" => {
+                let skills = crate::agent::skills::discover(&self.config.workspace_dir);
+                let msg = if skills.is_empty() {
+                    "No skills found. Add <name>/SKILL.md under .ecliven/skills, .agents/skills or ~/.config/ecliven-code/skills.".to_string()
+                } else {
+                    let lines: Vec<String> = skills
+                        .iter()
+                        .map(|s| format!("  {} - {} ({})", s.name, s.description, s.path.display()))
+                        .collect();
+                    format!("Skills ({}), loaded on demand by the agent:\n{}", skills.len(), lines.join("\n"))
+                };
+                self.active_state_mut().entries.push(ChatEntry::System(msg));
+            }
             "/help" => {
                 self.active_state_mut().entries.push(ChatEntry::System(
                     "Slash commands:\n\

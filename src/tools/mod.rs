@@ -348,6 +348,7 @@ impl ToolRegistry {
         self.register(Arc::new(knowledge::CodeSearchTool));
         self.register(Arc::new(knowledge::FindSymbolTool));
         self.register(Arc::new(knowledge::MemorySearchTool));
+        self.register(Arc::new(knowledge::LoadSkillTool));
         if writable {
             self.register(Arc::new(knowledge::MemorySaveTool));
             self.register(Arc::new(knowledge::UpdatePlanTool));

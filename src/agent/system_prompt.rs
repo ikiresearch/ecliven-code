@@ -31,6 +31,10 @@ pub fn build_system_prompt(workspace_root: &Path) -> String {
         prompt.push_str("\n\n");
         prompt.push_str(&rendered);
     }
+    if let Some(index) = crate::agent::skills::render_index(&crate::agent::skills::discover(workspace_root)) {
+        prompt.push_str("\n\n");
+        prompt.push_str(&index);
+    }
     prompt
 }
 

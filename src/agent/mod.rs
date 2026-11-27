@@ -2,6 +2,7 @@ pub mod checkpoint;
 pub mod compact;
 pub mod instructions;
 pub mod session;
+pub mod skills;
 pub mod store;
 pub mod system_prompt;
 
