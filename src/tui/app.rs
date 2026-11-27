@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -262,6 +262,7 @@ pub struct App {
     mcp: Option<McpConnections>,
     /// Context for the model (e.g. after /undo) prepended to the next prompt.
     pending_notes: Vec<String>,
+    pub pending_images: Vec<(String, crate::ai::ImageInput)>,
 }
 
 impl App {
@@ -364,6 +365,7 @@ impl App {
             session_store: None,
             mcp: None,
             pending_notes: Vec::new(),
+            pending_images: Vec::new(),
         }
     }
 
@@ -1327,6 +1329,28 @@ impl App {
             let notes = std::mem::take(&mut self.pending_notes).join("\n");
             format!("[Note: {notes}]\n\n{prompt}")
         };
+        let mut images = std::mem::take(&mut self.pending_images);
+        for token in prompt.split_whitespace().filter_map(|t| t.strip_prefix('@')) {
+            if crate::ai::ImageInput::media_type_for(Path::new(token)).is_none() {
+                continue;
+            }
+            let path = self.config.workspace_dir.join(token);
+            match crate::ai::ImageInput::from_path(&path) {
+                Ok(img) => images.push((path.display().to_string(), img)),
+                Err(e) => self.section_state_mut(section).entries.push(ChatEntry::Error(e)),
+            }
+        }
+        let active_kind = self.config.active_provider;
+        let text_only = crate::config::ProviderKind::EXTERNAL_CLIS.contains(&active_kind)
+            || active_kind == crate::config::ProviderKind::CustomCli;
+        let (prompt, turn_images) = if images.is_empty() {
+            (prompt, Vec::new())
+        } else if text_only || self.active_swarm_domain().is_some() {
+            let paths: Vec<&str> = images.iter().map(|(p, _)| p.as_str()).collect();
+            (format!("{prompt}\n\nAttached images (open them from disk): {}", paths.join(", ")), Vec::new())
+        } else {
+            (prompt, images.into_iter().map(|(_, img)| img).collect::<Vec<_>>())
+        };
         let target_scope = self.section_state(section).target_scope.clone();
         self.is_busy = true;
         self.section_state_mut(section).streaming_buffer.clear();
@@ -1410,6 +1434,7 @@ impl App {
                     }
                 });
                 let mut guard = session.lock().await;
+                guard.attach_images(turn_images);
                 engine.run_turn(&mut guard, prompt, tx).await;
                 let _ = fwd.await;
             });
@@ -1746,6 +1771,31 @@ impl App {
         let arg3 = parts.next();
 
         match cmd {
+            "/image" | "/images" => {
+                let msg = match arg1 {
+                    Some("clear") => {
+                        self.pending_images.clear();
+                        "Attached images cleared.".to_string()
+                    }
+                    Some(_) => {
+                        let raw = raw.split_once(' ').map(|(_, r)| r.trim()).unwrap_or_default();
+                        let path = self.config.workspace_dir.join(raw);
+                        match crate::ai::ImageInput::from_path(&path) {
+                            Ok(img) => {
+                                self.pending_images.push((path.display().to_string(), img));
+                                format!("Image attached to your next message ({} total). /image clear removes them.", self.pending_images.len())
+                            }
+                            Err(e) => e,
+                        }
+                    }
+                    None if self.pending_images.is_empty() => "Usage: /image <path> (png, jpg, gif, webp; max 5 MB), or write @path/to/image.png in your message.".to_string(),
+                    None => {
+                        let names: Vec<&str> = self.pending_images.iter().map(|(p, _)| p.as_str()).collect();
+                        format!("Attached to the next message: {}", names.join(", "))
+                    }
+                };
+                self.active_state_mut().entries.push(ChatEntry::System(msg));
+            }
             "/skills" => {
                 let skills = crate::agent::skills::discover(&self.config.workspace_dir);
                 let msg = if skills.is_empty() {

@@ -135,9 +135,23 @@ fn convert_messages(messages: &[Message]) -> Vec<Value> {
                 idx += 1;
             }
             Role::User => {
+                let content = if msg.images.is_empty() {
+                    json!(msg.content)
+                } else {
+                    let mut blocks: Vec<Value> = msg
+                        .images
+                        .iter()
+                        .map(|img| json!({
+                            "type": "image",
+                            "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
+                        }))
+                        .collect();
+                    blocks.push(json!({ "type": "text", "text": msg.content }));
+                    Value::Array(blocks)
+                };
                 out.push(json!({
                     "role": "user",
-                    "content": msg.content,
+                    "content": content,
                 }));
                 idx += 1;
             }
@@ -511,4 +525,14 @@ mod tests {
         }));
         assert_eq!((u.input_tokens, u.cache_read_tokens, u.cache_write_tokens, u.output_tokens), (1000, 880, 20, 7));
     }
+
+    #[test]
+    fn user_images_become_base64_image_blocks() {
+        let mut msg = Message::user("what is this");
+        msg.images.push(crate::ai::ImageInput { name: "a.png".into(), media_type: "image/png".into(), data: "QUJD".into() });
+        let v = convert_messages(&[msg]);
+        assert_eq!(v[0]["content"][0]["source"]["media_type"], "image/png");
+        assert_eq!(v[0]["content"][1]["text"], "what is this");
+    }
+
 }

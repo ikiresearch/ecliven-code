@@ -73,6 +73,11 @@ impl OllamaProvider {
 fn convert_message(msg: &Message) -> Value {
     match msg.role {
         Role::System => json!({ "role": "system", "content": msg.content }),
+        Role::User if !msg.images.is_empty() => json!({
+            "role": "user",
+            "content": msg.content,
+            "images": msg.images.iter().map(|img| img.data.clone()).collect::<Vec<_>>(),
+        }),
         Role::User => json!({ "role": "user", "content": msg.content }),
         Role::Assistant => {
             let mut obj = json!({

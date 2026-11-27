@@ -681,6 +681,9 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
             format!(" {} working... ", app.active_section.label())
         } else {
             match app.active_swarm_domain() {
+                None if !app.pending_images.is_empty() => {
+                    format!(" ❯ Prompt ({} image(s) attached) ", app.pending_images.len())
+                }
                 None => " ❯ Prompt ".to_string(),
                 Some(SwarmDomain::Code) => " ❯ Code Swarm (3 Coders -> CHIEF) ".to_string(),
                 Some(SwarmDomain::Security(SecuritySubMode::Defense)) => {

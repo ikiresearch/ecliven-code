@@ -64,6 +64,51 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageInput>,
+}
+
+/// An image attached to a user message, base64-encoded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageInput {
+    pub name: String,
+    pub media_type: String,
+    pub data: String,
+}
+
+pub const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+impl ImageInput {
+    pub fn media_type_for(path: &std::path::Path) -> Option<&'static str> {
+        let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+        Some(match ext.as_str() {
+            "png" => "image/png",
+            "jpg" | "jpeg" => "image/jpeg",
+            "gif" => "image/gif",
+            "webp" => "image/webp",
+            _ => return None,
+        })
+    }
+
+    pub fn from_path(path: &std::path::Path) -> Result<Self, String> {
+        use base64::Engine as _;
+        let media_type = Self::media_type_for(path)
+            .ok_or_else(|| format!("{}: only png, jpg, gif and webp images are supported", path.display()))?;
+        let len = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?.len();
+        if len > MAX_IMAGE_BYTES {
+            return Err(format!("{}: image is larger than 5 MB", path.display()));
+        }
+        let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(Self {
+            name: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+            media_type: media_type.to_string(),
+            data: base64::engine::general_purpose::STANDARD.encode(bytes),
+        })
+    }
+
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.media_type, self.data)
+    }
 }
 
 impl Message {
@@ -74,6 +119,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: None,
             tool_name: None,
+            images: Vec::new(),
         }
     }
 
@@ -84,6 +130,7 @@ impl Message {
             tool_calls,
             tool_call_id: None,
             tool_name: None,
+            images: Vec::new(),
         }
     }
 
@@ -98,6 +145,7 @@ impl Message {
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
             tool_name: Some(tool_name.into()),
+            images: Vec::new(),
         }
     }
 }

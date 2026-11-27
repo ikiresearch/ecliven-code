@@ -12,6 +12,7 @@ pub struct Session {
     checkpoints: Vec<Checkpoint>,
     next_checkpoint_seq: u64,
     recorder: Option<SessionRecorder>,
+    pending_images: Vec<crate::ai::ImageInput>,
 }
 
 impl Session {
@@ -75,7 +76,14 @@ impl Session {
     }
 
     pub fn push_user(&mut self, content: impl Into<String>) {
-        self.push(Message::user(content));
+        let mut message = Message::user(content);
+        message.images = std::mem::take(&mut self.pending_images);
+        self.push(message);
+    }
+
+    /// Images attached to the next user message.
+    pub fn attach_images(&mut self, images: Vec<crate::ai::ImageInput>) {
+        self.pending_images = images;
     }
 
     pub fn push_assistant(&mut self, content: impl Into<String>, tool_calls: Vec<ToolCall>) {

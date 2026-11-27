@@ -137,6 +137,12 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/help`
 - `/quit`
 
+## Autocompletado, imagenes y skills
+
+- **Autocompletado:** al escribir `/` aparece la lista de comandos; `Tab` completa el comando y sus argumentos (`/swarm red` → `/swarm red-eclipse`, `/model cod` → `/model codex/`).
+- **Imagenes:** `/image ruta/captura.png` o `@ruta/captura.png` dentro del mensaje adjunta la imagen (png, jpg, gif, webp; maximo 5 MB). Se envia como imagen a los proveedores por API; a los CLI externos y al Swarm se les pasa la ruta. `/image clear` las quita.
+- **Skills:** instrucciones reutilizables en `<nombre>/SKILL.md` dentro de `.ecliven/skills/`, `.agents/skills/` o `~/.config/ecliven-code/skills/`. El frontmatter `name` y `description` es opcional. Al modelo solo le llega el nombre y la descripcion de cada skill; el contenido se carga con la herramienta `load_skill` cuando la tarea lo necesita. `/skills` las lista.
+
 ## Sandbox de comandos
 
 `run_command` corre dentro de un sandbox del sistema operativo:

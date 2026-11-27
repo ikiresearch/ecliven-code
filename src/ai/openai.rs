@@ -142,6 +142,13 @@ fn convert_message(msg: &Message) -> Value {
             "role": "system",
             "content": msg.content,
         }),
+        Role::User if !msg.images.is_empty() => {
+            let mut parts = vec![json!({ "type": "text", "text": msg.content })];
+            parts.extend(msg.images.iter().map(|img| {
+                json!({ "type": "image_url", "image_url": { "url": img.data_url() } })
+            }));
+            json!({ "role": "user", "content": parts })
+        }
         Role::User => json!({
             "role": "user",
             "content": msg.content,
@@ -469,4 +476,14 @@ mod tests {
         .unwrap();
         assert_eq!((u.input_tokens, u.cache_read_tokens, u.output_tokens), (1200, 1024, 30));
     }
+
+    #[test]
+    fn user_images_become_image_url_parts() {
+        let mut msg = Message::user("what is this");
+        msg.images.push(crate::ai::ImageInput { name: "a.png".into(), media_type: "image/png".into(), data: "QUJD".into() });
+        let v = convert_message(&msg);
+        assert_eq!(v["content"][0]["text"], "what is this");
+        assert_eq!(v["content"][1]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
 }
