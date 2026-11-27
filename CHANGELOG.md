@@ -2,6 +2,16 @@
 
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). El proyecto sigue [versionado semántico](https://semver.org/lang/es/).
 
+## [0.4.1] - 2026-11-27
+
+### Añadido
+
+- Referencias `conector/modelo` en `/model` (por ejemplo `codex/test-model` u `opencode/test-model`), que cambian conector y modelo a la vez. Los modelos se muestran como `conector/modelo` en confirmaciones, `/status` y Swarm.
+- Router adaptativo: aprende la tasa de éxito, la latencia, los tokens y el costo reales de cada modelo, y salta los modelos en enfriamiento, poco fiables o lentos (`max_latency_ms`).
+- Fallback ante 429, errores 5xx o fallos de red, y escalamiento a un modelo mayor si se excede el contexto. La cadena es: modelo elegido, tiers superiores, `fallbacks` y modelo activo.
+- Presupuestos `max_session_usd` y `max_daily_usd` con precios en `[router.prices]`: al 80 % baja un tier y al 100 % solo usa modelos sin precio.
+- `/router` muestra estadísticas por modelo, gasto y enfriamientos; `/router reset` borra lo aprendido.
+
 ## [0.4.0] - 2026-11-26
 
 ### Añadido
@@ -34,4 +44,5 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/). E
 - Las sesiones guardadas informan los errores de escritura en lugar de ignorarlos.
 - Corregido el truncado de texto UTF-8 en la salida de herramientas.
 
+[0.4.1]: https://github.com/ikiresearch/ecliven-code/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/ikiresearch/ecliven-code/compare/v0.3.0...v0.4.0
