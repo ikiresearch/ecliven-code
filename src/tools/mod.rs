@@ -1,3 +1,4 @@
+pub mod ask;
 pub mod diff;
 pub mod fs;
 pub mod knowledge;
@@ -340,6 +341,7 @@ impl ToolRegistry {
         reg.register(Arc::new(search::SearchFilesTool));
         reg.register(Arc::new(search::GrepContentTool));
         reg.register(Arc::new(shell::RunCommandTool));
+        reg.register(Arc::new(ask::AskUserTool));
         reg.register_knowledge_tools(true);
         reg
     }

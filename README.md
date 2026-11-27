@@ -132,10 +132,17 @@ cargo run -- --provider ollama --model qwen2.5-coder:14b --prompt "Resume la est
 - `/memory [search <q>|add [--user] <texto>|forget <id>|confirm <id>|stale]`
 - `/trust [yes|deny|revoke|status]`
 - `/index [rebuild]` | `/tasks` | `/goal [<texto>|done|clear]` | `/workflow [on|off]`
+- `/queue [clear|pop]` (muestra o limpia mensajes en cola)
 - `/status`
 - `/clear`
 - `/help`
 - `/quit`
+
+## Interaccion: preguntas, cola de mensajes y mouse
+
+- **Preguntas del agente (`ask_user`):** cuando el agente tiene dudas o necesita una decision, abre un modal con opciones (seleccion unica o multiple) y un campo para escribir una respuesta personalizada. Puedes elegir haciendo clic, pulsando `1-9`, usando flechas o escribiendo directamente. En modo CLI sin interfaz, pregunta por consola.
+- **Mensajes en cola:** mientras el agente trabaja, puedes escribir y pulsar `Enter` para encolar mensajes de seguimiento. Se ejecutan automaticamente en orden al terminar el turno actual. Encima del prompt aparece la barra de cola con `[Clear queue]`, y puedes gestionarla con `/queue`, `/queue pop` o `/queue clear`.
+- **Soporte de mouse en la terminal:** puedes hacer clic en las opciones de preguntas, botones de aprobacion (`Approve` / `Deny`), pestanas de la barra superior, lista de modelos, tarjetas de Swarm Hub, asistente inicial y `[Clear queue]`. La rueda del mouse desplaza el historial o las listas abiertas.
 
 ## Sandbox de comandos
 

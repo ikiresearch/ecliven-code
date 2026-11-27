@@ -281,6 +281,16 @@ async fn run_headless(config: AppConfig, prompt: String, resume: Option<String>)
                 let approved = prompt_cli_approval(&tool_name, &preview.summary, preview.diff);
                 let _ = respond_to.send(approved);
             }
+            AgentEvent::UserQuestionRequested {
+                question,
+                options,
+                allow_multiple,
+                respond_to,
+                ..
+            } => {
+                let answer = prompt_cli_question(&question, &options, allow_multiple);
+                let _ = respond_to.send(answer);
+            }
             AgentEvent::ToolStarted { tool_name, summary } => {
                 eprintln!("[tool:{tool_name}] {summary}");
             }
@@ -419,6 +429,46 @@ fn prompt_cli_approval(tool_name: &str, summary: &str, diff: Option<String>) -> 
     let mut line = String::new();
     let _ = io::stdin().read_line(&mut line);
     matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+fn prompt_cli_question(question: &str, options: &[String], allow_multiple: bool) -> String {
+    eprintln!("\n[question] {question}");
+    for (i, opt) in options.iter().enumerate() {
+        eprintln!("  {}) {opt}", i + 1);
+    }
+    if options.is_empty() {
+        eprint!("Answer: ");
+    } else if allow_multiple {
+        eprint!("Choose number(s) separated by commas, or type an answer: ");
+    } else {
+        eprint!("Choose [1-{}] or type an answer: ", options.len());
+    }
+    let _ = io::stderr().flush();
+
+    let mut line = String::new();
+    let _ = io::stdin().read_line(&mut line);
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return "No answer provided.".to_string();
+    }
+    if !options.is_empty() {
+        if allow_multiple && trimmed.contains(',') {
+            let picked: Vec<String> = trimmed
+                .split(',')
+                .filter_map(|p| p.trim().parse::<usize>().ok())
+                .filter_map(|n| n.checked_sub(1).and_then(|i| options.get(i)))
+                .cloned()
+                .collect();
+            if !picked.is_empty() {
+                return picked.join(", ");
+            }
+        } else if let Ok(n) = trimmed.parse::<usize>() {
+            if let Some(opt) = n.checked_sub(1).and_then(|i| options.get(i)) {
+                return opt.clone();
+            }
+        }
+    }
+    trimmed.to_string()
 }
 
 async fn run_update_command(check_only: bool, version: Option<String>) -> Result<()> {

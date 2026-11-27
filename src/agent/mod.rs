@@ -28,6 +28,13 @@ pub enum AgentEvent {
         preview: ToolPreview,
         respond_to: oneshot::Sender<bool>,
     },
+    UserQuestionRequested {
+        call_id: String,
+        question: String,
+        options: Vec<String>,
+        allow_multiple: bool,
+        respond_to: oneshot::Sender<String>,
+    },
     ToolStarted {
         tool_name: String,
         summary: String,
@@ -318,6 +325,40 @@ impl AgentEngine {
             }
 
             for call in response.tool_calls {
+                if call.name == crate::tools::ask::ASK_USER_TOOL_NAME {
+                    match crate::tools::ask::parse_question(&call.arguments) {
+                        Ok(parsed) => {
+                            let (resp_tx, resp_rx) = oneshot::channel();
+                            let _ = event_tx.send(AgentEvent::UserQuestionRequested {
+                                call_id: call.id.clone(),
+                                question: parsed.question,
+                                options: parsed.options,
+                                allow_multiple: parsed.allow_multiple,
+                                respond_to: resp_tx,
+                            });
+                            let answer = resp_rx
+                                .await
+                                .unwrap_or_else(|_| "User dismissed the question.".to_string());
+                            let output = ToolOutput::ok(answer.clone());
+                            session.push_tool_result(&call.id, &call.name, answer);
+                            let _ = event_tx.send(AgentEvent::ToolCompleted {
+                                tool_name: call.name,
+                                output,
+                            });
+                        }
+                        Err(err) => {
+                            let msg = format!("Tool error: {err}");
+                            let output = ToolOutput::err(msg.clone());
+                            session.push_tool_result(&call.id, &call.name, msg);
+                            let _ = event_tx.send(AgentEvent::ToolCompleted {
+                                tool_name: call.name,
+                                output,
+                            });
+                        }
+                    }
+                    continue;
+                }
+
                 let Some(tool) = self.tools.get(&call.name) else {
                     let err_msg = format!("Unknown tool '{}'", call.name);
                     let output = ToolOutput::err(err_msg.clone());
@@ -537,5 +578,80 @@ mod tests {
             session.messages().last().unwrap().content,
             "The file says: rust rocks"
         );
+    }
+
+    #[tokio::test]
+    async fn agent_asks_user_and_uses_selected_answer() {
+        let tmp = TempDir::new().unwrap();
+        let provider = Arc::new(MockProvider {
+            responses: Mutex::new(vec![
+                CompletionResponse {
+                    content: String::new(),
+                    tool_calls: vec![ToolCall {
+                        id: "q1".into(),
+                        name: "ask_user".into(),
+                        arguments: json!({
+                            "question": "Pick a format",
+                            "options": ["JSON", "TOML"]
+                        }),
+                    }],
+                    usage: None,
+                    stop_reason: Some("tool_use".into()),
+                    external_tools: Vec::new(),
+                },
+                CompletionResponse {
+                    content: "Using TOML.".into(),
+                    tool_calls: Vec::new(),
+                    usage: None,
+                    stop_reason: Some("end_turn".into()),
+                    external_tools: Vec::new(),
+                },
+            ]),
+        });
+
+        let engine = AgentEngine::new(
+            provider,
+            Arc::new(ToolRegistry::default_registry()),
+            ToolContext::new(tmp.path().to_path_buf(), 10),
+            AgentOptions {
+                max_tokens: 256,
+                temperature: 0.0,
+                max_tool_iterations: 4,
+                approval_mode: ApprovalMode::Ask,
+            },
+        );
+
+        let mut session = Session::new();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move {
+            engine.run_turn(&mut session, "Add config".into(), tx).await;
+            session
+        });
+
+        let mut saw_question = false;
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                AgentEvent::UserQuestionRequested {
+                    question,
+                    options,
+                    respond_to,
+                    ..
+                } => {
+                    assert_eq!(question, "Pick a format");
+                    assert_eq!(options, vec!["JSON", "TOML"]);
+                    saw_question = true;
+                    let _ = respond_to.send("TOML".into());
+                }
+                AgentEvent::TurnComplete => break,
+                _ => {}
+            }
+        }
+        let session = handle.await.unwrap();
+        assert!(saw_question);
+        assert!(session
+            .messages()
+            .iter()
+            .any(|m| m.content == "TOML" && m.tool_name.as_deref() == Some("ask_user")));
+        assert_eq!(session.messages().last().unwrap().content, "Using TOML.");
     }
 }

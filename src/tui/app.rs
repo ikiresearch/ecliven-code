@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -22,6 +22,7 @@ use crate::swarm::{SwarmAgentStatus, SwarmEngine, SwarmEvent, SwarmOptions};
 use crate::tools::sandbox::SandboxMode;
 use crate::tools::{ToolContext, ToolOutput, ToolPreview, ToolRegistry};
 use crate::tui::keybindings::ModalState;
+use crate::tui::mouse::{ClickTarget, HitMap};
 use crate::tui::onboarding::{OnboardingState, OnboardingStep};
 use crate::updater::{self, ReleaseInfo, UpdateStatus};
 
@@ -113,6 +114,8 @@ pub struct SectionState {
     pub target_scope: Option<String>,
     /// Prompt tokens reported by the latest response in this tab.
     pub context_tokens: u32,
+    /// Follow-up prompts submitted while the agent is busy, executed in FIFO order.
+    pub queued_prompts: VecDeque<String>,
 }
 
 impl SectionState {
@@ -127,6 +130,7 @@ impl SectionState {
             lead_status: SwarmAgentStatus::Idle,
             target_scope: None,
             context_tokens: 0,
+            queued_prompts: VecDeque::new(),
         }
     }
 
@@ -142,6 +146,7 @@ impl SectionState {
             lead_status: SwarmAgentStatus::Idle,
             target_scope,
             context_tokens: 0,
+            queued_prompts: VecDeque::new(),
         }
     }
 
@@ -227,6 +232,86 @@ pub struct PendingApproval {
     pub respond_to: oneshot::Sender<bool>,
 }
 
+pub struct PendingQuestion {
+    pub question: String,
+    pub options: Vec<String>,
+    pub allow_multiple: bool,
+    /// `0..options.len()` highlights an option; `options.len()` highlights the custom answer box.
+    pub selected: usize,
+    pub checked: Vec<bool>,
+    pub custom_input: String,
+    pub typing_custom: bool,
+    pub respond_to: oneshot::Sender<String>,
+}
+
+impl PendingQuestion {
+    pub fn new(
+        question: String,
+        options: Vec<String>,
+        allow_multiple: bool,
+        respond_to: oneshot::Sender<String>,
+    ) -> Self {
+        let typing_custom = options.is_empty();
+        let checked = vec![false; options.len()];
+        Self {
+            question,
+            options,
+            allow_multiple,
+            selected: 0,
+            checked,
+            custom_input: String::new(),
+            typing_custom,
+            respond_to,
+        }
+    }
+
+    pub fn custom_row_index(&self) -> usize {
+        self.options.len()
+    }
+
+    pub fn row_count(&self) -> usize {
+        self.options.len() + 1
+    }
+
+    pub fn build_answer(&self) -> Option<String> {
+        let custom = self.custom_input.trim();
+        if self.typing_custom || self.selected == self.custom_row_index() {
+            if !custom.is_empty() {
+                if self.allow_multiple {
+                    let mut chosen: Vec<String> = self
+                        .options
+                        .iter()
+                        .zip(&self.checked)
+                        .filter_map(|(opt, &c)| c.then(|| opt.clone()))
+                        .collect();
+                    chosen.push(custom.to_string());
+                    return Some(chosen.join(", "));
+                }
+                return Some(custom.to_string());
+            }
+            if self.options.is_empty() {
+                return None;
+            }
+        }
+        if self.allow_multiple {
+            let mut chosen: Vec<String> = self
+                .options
+                .iter()
+                .zip(&self.checked)
+                .filter_map(|(opt, &c)| c.then(|| opt.clone()))
+                .collect();
+            if !custom.is_empty() {
+                chosen.push(custom.to_string());
+            }
+            if chosen.is_empty() {
+                return self.options.get(self.selected).cloned();
+            }
+            return Some(chosen.join(", "));
+        }
+        self.options.get(self.selected).cloned()
+    }
+}
+
 pub struct App {
     pub config: AppConfig,
     pub prefs: UserPreferences,
@@ -257,6 +342,8 @@ pub struct App {
     pub model_cache: HashMap<ProviderKind, Vec<ModelOption>>,
     pub model_picker: Option<ModelPickerState>,
     pub pending_approval: Option<PendingApproval>,
+    pub pending_question: Option<PendingQuestion>,
+    pub hit_map: HitMap,
     tools: Arc<ToolRegistry>,
     session_store: Option<SessionStore>,
     mcp: Option<McpConnections>,
@@ -360,6 +447,8 @@ impl App {
             model_cache: HashMap::new(),
             model_picker: None,
             pending_approval: None,
+            pending_question: None,
+            hit_map: HitMap::default(),
             tools: Arc::new(ToolRegistry::default_registry()),
             session_store: None,
             mcp: None,
@@ -715,6 +804,12 @@ impl App {
         }
         if self.pending_approval.is_some() {
             ModalState::Approval
+        } else if let Some(ref q) = self.pending_question {
+            if q.typing_custom {
+                ModalState::QuestionInput
+            } else {
+                ModalState::Question
+            }
         } else if self.model_picker.is_some() {
             ModalState::ModelPicker
         } else if self.show_swarm_hub {
@@ -1236,6 +1331,268 @@ impl App {
         }
     }
 
+    pub fn question_up(&mut self) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        q.typing_custom = false;
+        q.selected = q.selected.saturating_sub(1);
+    }
+
+    pub fn question_down(&mut self) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        let last = q.row_count().saturating_sub(1);
+        if q.selected < last {
+            q.selected += 1;
+        }
+        q.typing_custom = q.selected == q.custom_row_index() && q.options.is_empty();
+    }
+
+    pub fn question_toggle(&mut self) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        if q.selected == q.custom_row_index() {
+            q.typing_custom = true;
+            return;
+        }
+        if q.allow_multiple {
+            if let Some(slot) = q.checked.get_mut(q.selected) {
+                *slot = !*slot;
+            }
+        }
+    }
+
+    pub fn question_digit(&mut self, idx: usize) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        if idx >= q.options.len() {
+            return;
+        }
+        q.selected = idx;
+        q.typing_custom = false;
+        if q.allow_multiple {
+            if let Some(slot) = q.checked.get_mut(idx) {
+                *slot = !*slot;
+            }
+        } else {
+            self.question_confirm();
+        }
+    }
+
+    pub fn question_click_option(&mut self, idx: usize) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        if idx >= q.options.len() {
+            return;
+        }
+        q.selected = idx;
+        q.typing_custom = false;
+        if q.allow_multiple {
+            if let Some(slot) = q.checked.get_mut(idx) {
+                *slot = !*slot;
+            }
+        } else {
+            self.question_confirm();
+        }
+    }
+
+    pub fn question_focus_custom(&mut self) {
+        if let Some(ref mut q) = self.pending_question {
+            q.selected = q.custom_row_index();
+            q.typing_custom = true;
+        }
+    }
+
+    pub fn question_focus_options(&mut self) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        if q.options.is_empty() {
+            self.question_cancel();
+        } else {
+            q.typing_custom = false;
+            if q.selected >= q.options.len() {
+                q.selected = q.options.len().saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn question_input_char(&mut self, c: char) {
+        if let Some(ref mut q) = self.pending_question {
+            q.selected = q.custom_row_index();
+            q.typing_custom = true;
+            q.custom_input.push(c);
+        }
+    }
+
+    pub fn question_input_backspace(&mut self) {
+        if let Some(ref mut q) = self.pending_question {
+            q.custom_input.pop();
+        }
+    }
+
+    pub fn question_confirm(&mut self) {
+        let Some(ref mut q) = self.pending_question else {
+            return;
+        };
+        if q.selected == q.custom_row_index()
+            && !q.typing_custom
+            && q.custom_input.trim().is_empty()
+        {
+            q.typing_custom = true;
+            return;
+        }
+        let Some(answer) = q.build_answer() else {
+            return;
+        };
+        if let Some(pending) = self.pending_question.take() {
+            let _ = pending.respond_to.send(answer);
+        }
+    }
+
+    pub fn question_cancel(&mut self) {
+        if let Some(pending) = self.pending_question.take() {
+            let _ = pending
+                .respond_to
+                .send("User dismissed the question.".to_string());
+        }
+    }
+
+    pub fn clear_queue(&mut self) {
+        let n = self.active_state().queued_prompts.len();
+        self.active_state_mut().queued_prompts.clear();
+        if n > 0 {
+            self.push_system(format!("Cleared {n} queued message(s)."));
+        }
+    }
+
+    fn handle_queue_command(&mut self, arg1: Option<&str>) {
+        match arg1 {
+            Some("clear") => self.clear_queue(),
+            Some("pop") => {
+                if let Some(removed) = self.active_state_mut().queued_prompts.pop_back() {
+                    self.push_system(format!("Removed from queue: {removed}"));
+                } else {
+                    self.push_system("Queue is empty.".to_string());
+                }
+            }
+            None => {
+                let items: Vec<String> = self
+                    .active_state()
+                    .queued_prompts
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| format!("  {}. {}", i + 1, p.lines().next().unwrap_or("")))
+                    .collect();
+                if items.is_empty() {
+                    self.push_system("Queue is empty.".to_string());
+                } else {
+                    self.push_system(format!(
+                        "Queued messages ({}):\n{}\nUse `/queue clear` or `/queue pop` to edit.",
+                        items.len(),
+                        items.join("\n")
+                    ));
+                }
+            }
+            Some(_) => self.push_error("Usage: /queue [clear|pop]"),
+        }
+    }
+
+    pub fn handle_mouse_scroll(&mut self, up: bool) {
+        match self.modal_state() {
+            ModalState::ModelPicker => {
+                if up {
+                    self.model_picker_up();
+                } else {
+                    self.model_picker_down();
+                }
+            }
+            ModalState::Question | ModalState::QuestionInput => {
+                if up {
+                    self.question_up();
+                } else {
+                    self.question_down();
+                }
+            }
+            ModalState::OnboardingWorkspace | ModalState::OnboardingTelemetry => {
+                if up {
+                    self.onboarding_up();
+                } else {
+                    self.onboarding_down();
+                }
+            }
+            _ => {
+                if up {
+                    self.scroll_up(3);
+                } else {
+                    self.scroll_down(3);
+                }
+            }
+        }
+    }
+
+    pub fn handle_mouse_click(
+        &mut self,
+        col: u16,
+        row: u16,
+        ui_tx: mpsc::UnboundedSender<UiEvent>,
+    ) {
+        let Some(target) = self.hit_map.hit(col, row) else {
+            return;
+        };
+        match target {
+            ClickTarget::SwitchSection(sec) => {
+                if self.modal_state() == ModalState::None {
+                    self.switch_section(sec);
+                }
+            }
+            ClickTarget::OpenModelPicker => {
+                if self.modal_state() == ModalState::None {
+                    self.open_model_picker(ui_tx);
+                }
+            }
+            ClickTarget::ClearQueue => self.clear_queue(),
+            ClickTarget::ApproveYes => self.resolve_approval(true),
+            ClickTarget::ApproveNo => self.resolve_approval(false),
+            ClickTarget::QuestionOption(idx) => self.question_click_option(idx),
+            ClickTarget::QuestionCustom => self.question_focus_custom(),
+            ClickTarget::QuestionSubmit => self.question_confirm(),
+            ClickTarget::QuestionCancel => self.question_cancel(),
+            ClickTarget::ModelPickerItem(idx) => {
+                if let Some(ref mut picker) = self.model_picker {
+                    let count = picker.filtered_models().len();
+                    if idx < count {
+                        picker.selected = idx;
+                        self.model_picker_select();
+                    }
+                }
+            }
+            ClickTarget::SwarmHubCode => self.switch_section(WorkspaceSection::SwarmCode),
+            ClickTarget::SwarmHubDefense => self.set_security_sub_mode(SecuritySubMode::Defense),
+            ClickTarget::SwarmHubThreat => self.set_security_sub_mode(SecuritySubMode::ThreatModel),
+            ClickTarget::SwarmHubChat => self.switch_section(WorkspaceSection::Chat),
+            ClickTarget::OnboardingConfirm => self.onboarding_confirm(),
+            ClickTarget::OnboardingCancel => self.onboarding_cancel(),
+            ClickTarget::OnboardingTelemetry(enabled) => self.onboarding_set_telemetry(enabled),
+            ClickTarget::OnboardingFolder(idx) => {
+                if let Some(ref mut ob) = self.onboarding {
+                    if idx < ob.total_workspace_items() {
+                        ob.selected_index = idx;
+                        self.onboarding_confirm();
+                    }
+                }
+            }
+            ClickTarget::OnboardingParent => self.onboarding_parent(),
+            ClickTarget::OnboardingToggleManualPath => self.onboarding_toggle_manual_path(),
+            ClickTarget::CloseModal => self.close_modals(),
+        }
+    }
+
     pub async fn clear_session(&mut self) {
         if self.is_busy {
             return;
@@ -1250,9 +1607,6 @@ impl App {
     }
 
     pub async fn submit_input(&mut self, ui_tx: mpsc::UnboundedSender<UiEvent>) {
-        if self.is_busy {
-            return;
-        }
         let prompt = self.input.trim().to_string();
         if prompt.is_empty() {
             return;
@@ -1264,17 +1618,68 @@ impl App {
         self.cursor_pos = 0;
         self.active_state_mut().auto_scroll = true;
 
+        if self.is_busy {
+            if prompt.starts_with("/queue") {
+                let arg1 = prompt.split_whitespace().nth(1);
+                self.handle_queue_command(arg1);
+                return;
+            }
+            if prompt.starts_with('/') {
+                self.push_system(
+                    "Agent is busy. Only `/queue [clear|pop]` runs immediately; normal messages are queued."
+                        .to_string(),
+                );
+                return;
+            }
+            self.active_state_mut().queued_prompts.push_back(prompt);
+            return;
+        }
+
         if prompt.starts_with('/') {
             self.handle_slash_command(&prompt, ui_tx).await;
             return;
         }
 
         let section = self.active_section;
+        self.start_prompt_turn(section, prompt, ui_tx).await;
+    }
+
+    pub async fn dispatch_next_queued(&mut self, ui_tx: mpsc::UnboundedSender<UiEvent>) {
+        if self.is_busy || self.pending_approval.is_some() || self.pending_question.is_some() {
+            return;
+        }
+        let sections = [
+            self.active_section,
+            WorkspaceSection::Chat,
+            WorkspaceSection::SwarmCode,
+            WorkspaceSection::SwarmSecurity,
+            WorkspaceSection::SwarmTeam,
+        ];
+        for section in sections {
+            if let Some(next_prompt) = self.section_state_mut(section).queued_prompts.pop_front() {
+                self.start_prompt_turn(section, next_prompt, ui_tx).await;
+                return;
+            }
+        }
+    }
+
+    async fn start_prompt_turn(
+        &mut self,
+        section: WorkspaceSection,
+        prompt: String,
+        ui_tx: mpsc::UnboundedSender<UiEvent>,
+    ) {
         self.section_state_mut(section)
             .entries
             .push(ChatEntry::User(prompt.clone()));
 
-        let is_swarm = self.active_swarm_domain().is_some();
+        let swarm_domain = match section {
+            WorkspaceSection::Chat => None,
+            WorkspaceSection::SwarmCode => Some(SwarmDomain::Code),
+            WorkspaceSection::SwarmSecurity => Some(SwarmDomain::Security(self.security_sub_mode)),
+            WorkspaceSection::SwarmTeam => Some(self.team_domain),
+        };
+        let is_swarm = swarm_domain.is_some();
         let selected = if is_swarm {
             build_provider(&self.config).map(|p| (p, None))
         } else {
@@ -1321,7 +1726,7 @@ impl App {
         self.is_busy = true;
         self.section_state_mut(section).streaming_buffer.clear();
 
-        if let Some(domain) = self.active_swarm_domain() {
+        if let Some(domain) = swarm_domain {
             self.section_state_mut(section).reset_roster_idle();
 
             let mixed = crate::ai::router::swarm_providers(&self.config);
@@ -1519,6 +1924,20 @@ impl App {
                     preview,
                     respond_to,
                 });
+            }
+            AgentEvent::UserQuestionRequested {
+                question,
+                options,
+                allow_multiple,
+                respond_to,
+                ..
+            } => {
+                self.pending_question = Some(PendingQuestion::new(
+                    question,
+                    options,
+                    allow_multiple,
+                    respond_to,
+                ));
             }
             AgentEvent::ToolStarted { tool_name, summary } => {
                 let st = self.section_state_mut(section);
@@ -1772,6 +2191,7 @@ impl App {
                      /tasks | /goal <text> | /goal done              Task history and active goal\n\
                      /workflow [on|off]                              Guided inspect-plan-verify-remember loop\n\
                      /trust [yes|deny|revoke|status]                 Enable executable settings of this workspace\n\
+                     /queue [clear|pop]                              Show or clear queued follow-up messages\n\
                      /status                                         Show session & provider status\n\
                      /clear                                          Clear current tab history\n\
                      /quit                                           Exit Ecliven Code\n\n\
@@ -2057,6 +2477,9 @@ impl App {
                 );
                 self.active_state_mut().entries.push(ChatEntry::System(msg));
             }
+            "/queue" => {
+                self.handle_queue_command(arg1);
+            }
             "/clear" => {
                 self.clear_session().await;
             }
@@ -2236,4 +2659,86 @@ fn truncate_lines(text: &str, max_lines: usize) -> String {
     let mut out = lines[..max_lines].join("\n");
     out.push_str(&format!("\n... ({} more lines)", lines.len() - max_lines));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn test_app() -> App {
+        App::new(AppConfig::default_for_workspace(PathBuf::from(".")), None, None)
+    }
+
+    #[tokio::test]
+    async fn queues_follow_up_messages_while_busy_and_clears_via_command() {
+        let mut app = test_app();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        app.is_busy = true;
+
+        app.input = "first follow-up".into();
+        app.cursor_pos = app.input.len();
+        app.submit_input(tx.clone()).await;
+
+        app.input = "second follow-up".into();
+        app.cursor_pos = app.input.len();
+        app.submit_input(tx.clone()).await;
+
+        assert_eq!(
+            app.active_state().queued_prompts.iter().cloned().collect::<Vec<_>>(),
+            vec!["first follow-up", "second follow-up"]
+        );
+
+        app.input = "/queue pop".into();
+        app.submit_input(tx.clone()).await;
+        assert_eq!(app.active_state().queued_prompts.len(), 1);
+
+        app.input = "/queue clear".into();
+        app.submit_input(tx).await;
+        assert!(app.active_state().queued_prompts.is_empty());
+    }
+
+    #[test]
+    fn question_modal_supports_mouse_click_multi_select_and_custom_text() {
+        let mut app = test_app();
+        let (ui_tx, _ui_rx) = mpsc::unbounded_channel();
+
+        // Single-select: render and click option 2 directly using recorded HitMap
+        let (tx, mut rx) = oneshot::channel();
+        app.pending_question = Some(PendingQuestion::new(
+            "Which runtime?".into(),
+            vec!["Tokio".into(), "Async-std".into()],
+            false,
+            tx,
+        ));
+        let mut term = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        term.draw(|f| crate::tui::ui::render(f, &mut app)).unwrap();
+        let mut clicked = false;
+        'search: for y in 0..30 {
+            for x in 0..100 {
+                if app.hit_map.hit(x, y) == Some(ClickTarget::QuestionOption(1)) {
+                    app.handle_mouse_click(x, y, ui_tx.clone());
+                    clicked = true;
+                    break 'search;
+                }
+            }
+        }
+        assert!(clicked, "option 1 should have a clickable region");
+        assert_eq!(rx.try_recv().unwrap(), "Async-std");
+
+        // Multi-select + custom answer
+        let (tx, mut rx) = oneshot::channel();
+        app.pending_question = Some(PendingQuestion::new(
+            "Features?".into(),
+            vec!["Auth".into(), "Tests".into()],
+            true,
+            tx,
+        ));
+        app.question_click_option(0);
+        app.question_input_char('C');
+        app.question_input_char('I');
+        app.question_confirm();
+        assert_eq!(rx.try_recv().unwrap(), "Auth, CI");
+    }
 }

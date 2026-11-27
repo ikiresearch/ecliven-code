@@ -388,6 +388,12 @@ async fn drive_agent(
                         respond_to,
                     });
                 }
+                AgentEvent::UserQuestionRequested { respond_to, .. } => {
+                    let _ = respond_to.send(
+                        "Autonomous swarm worker: no user available; proceed with your best judgment."
+                            .to_string(),
+                    );
+                }
                 AgentEvent::ToolStarted { tool_name, summary } => {
                     if let Some((role, name)) = &worker {
                         let _ = fwd.send(SwarmEvent::WorkerStatus {

@@ -7,15 +7,19 @@ use crate::swarm::domain::{SecuritySubMode, SwarmDomain};
 use crate::swarm::SwarmAgentStatus;
 use crate::tui::app::{App, ChatEntry, WorkspaceSection};
 use crate::tui::eclipse::{self, EclipsePalette, ECLIPSE_HEIGHT};
+use crate::tui::mouse::{ClickTarget, HitMap};
 use crate::tui::onboarding::{OnboardingState, OnboardingStep};
 use crate::tui::theme::Theme;
 
 const SPINNER: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 pub fn render(frame: &mut Frame<'_>, app: &mut App) {
+    app.hit_map.clear();
     let area = frame.area();
     if let Some(ref ob) = app.onboarding {
-        render_onboarding_wizard(frame, ob, area);
+        let mut hits = HitMap::default();
+        render_onboarding_wizard(frame, ob, &mut hits, area);
+        app.hit_map = hits;
         return;
     }
 
@@ -29,6 +33,8 @@ pub fn render(frame: &mut Frame<'_>, app: &mut App) {
 
     if app.pending_approval.is_some() {
         render_approval_modal(frame, app, area);
+    } else if app.pending_question.is_some() {
+        render_question_modal(frame, app, area);
     } else if app.model_picker.is_some() {
         render_model_picker_modal(frame, app, area);
     } else if app.show_swarm_hub {
@@ -174,12 +180,18 @@ fn render_landing(frame: &mut Frame<'_>, app: &App, area: Rect, update_height: u
 }
 
 fn render_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect, update_height: u16) {
+    let queue_height = if app.active_state().queued_prompts.is_empty() {
+        0
+    } else {
+        1
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
             Constraint::Length(update_height),
             Constraint::Min(6),
+            Constraint::Length(queue_height),
             Constraint::Length(4),
             Constraint::Length(1),
         ])
@@ -201,8 +213,44 @@ fn render_workspace(frame: &mut Frame<'_>, app: &mut App, area: Rect, update_hei
         render_transcript(frame, app, chunks[2]);
     }
 
-    render_input_box(frame, app, chunks[3], false);
-    render_footer(frame, app, chunks[4]);
+    if queue_height > 0 {
+        render_queue_bar(frame, app, chunks[3]);
+    }
+    render_input_box(frame, app, chunks[4], false);
+    render_footer(frame, app, chunks[5]);
+}
+
+fn render_queue_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let queue = &app.active_state().queued_prompts;
+    let count = queue.len();
+    let next = queue
+        .front()
+        .map(|s| s.lines().next().unwrap_or("").trim())
+        .unwrap_or("");
+    let preview: String = next.chars().take(60).collect();
+    let suffix = if next.chars().count() > 60 { "…" } else { "" };
+
+    let clear_label = " [Clear queue] ";
+    let clear_w = clear_label.len() as u16;
+    let main_w = area.width.saturating_sub(clear_w);
+
+    let text = Line::from(vec![
+        Span::styled(format!(" ⏳ Queued ({count}): "), Theme::status_running()),
+        Span::styled(format!("{preview}{suffix}"), Theme::system_text()),
+    ]);
+    frame.render_widget(
+        Paragraph::new(text),
+        Rect::new(area.x, area.y, main_w, 1),
+    );
+
+    if area.width > clear_w {
+        let clear_rect = Rect::new(area.x + main_w, area.y, clear_w, 1);
+        frame.render_widget(
+            Paragraph::new(Span::styled(clear_label, Theme::brand())),
+            clear_rect,
+        );
+        app.hit_map.push(clear_rect, ClickTarget::ClearQueue);
+    }
 }
 
 fn render_update_banner(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -220,7 +268,7 @@ fn render_update_banner(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(banner, area);
 }
 
-fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_top_bar(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let settings = app.config.active_settings();
     let workspace = app
         .config
@@ -234,11 +282,41 @@ fn render_top_bar(frame: &mut Frame<'_>, app: &App, area: Rect) {
         "◐"
     };
 
-    let mut spans = vec![
-        Span::styled(format!(" {icon} ECLIVEN "), Theme::brand()),
-        Span::styled("│ ", Theme::footer_hint()),
+    let brand_text = format!(" {icon} ECLIVEN ");
+    let sep_text = "│ ";
+    let mut x = area
+        .x
+        .saturating_add((brand_text.chars().count() + sep_text.chars().count()) as u16);
+
+    let pills = build_mode_pills(app);
+    let sections = [
+        WorkspaceSection::Chat,
+        WorkspaceSection::SwarmCode,
+        WorkspaceSection::SwarmSecurity,
+        WorkspaceSection::SwarmTeam,
     ];
-    spans.extend(build_mode_pills(app).spans);
+    let mut sec_idx = 0;
+    for span in &pills.spans {
+        let w = span.content.chars().count() as u16;
+        if !span.content.trim().is_empty() {
+            if let Some(&sec) = sections.get(sec_idx) {
+                if x < area.x.saturating_add(area.width) {
+                    app.hit_map.push(
+                        Rect::new(x, area.y, w.min(area.x + area.width - x), 1),
+                        ClickTarget::SwitchSection(sec),
+                    );
+                }
+                sec_idx += 1;
+            }
+        }
+        x = x.saturating_add(w);
+    }
+
+    let mut spans = vec![
+        Span::styled(brand_text, Theme::brand()),
+        Span::styled(sep_text, Theme::footer_hint()),
+    ];
+    spans.extend(pills.spans);
     spans.push(Span::styled(
         format!(
             "  │  {}/{} · {}  │  ",
@@ -634,8 +712,13 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
         .padding(Padding::horizontal(1));
 
     if !is_landing {
+        let queued = app.active_state().queued_prompts.len();
         let title = if app.is_busy {
-            format!(" {} working... ", app.active_section.label())
+            if queued > 0 {
+                format!(" {} working... · {queued} queued ", app.active_section.label())
+            } else {
+                format!(" {} working... (type to queue next) ", app.active_section.label())
+            }
         } else {
             match app.active_swarm_domain() {
                 None => " ❯ Prompt ".to_string(),
@@ -663,26 +746,30 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if app.input.is_empty() && !app.is_busy {
-        let placeholder = match app.active_swarm_domain() {
-            None => "❯ Ask Ecliven anything...  (/connect codex|agy, /swarm, /help)",
-            Some(SwarmDomain::Code) => {
-                "❯ Describe the coding task for 3 parallel coders + Chief..."
-            }
-            Some(SwarmDomain::Security(SecuritySubMode::Defense)) => {
-                "❯ Audit codebase or folder for vulnerabilities (/scope src)..."
-            }
-            Some(SwarmDomain::Security(SecuritySubMode::ThreatModel)) => {
-                "❯ Run STRIDE threat modeling & hardening review..."
-            }
-            Some(SwarmDomain::Competitive) => {
-                "❯ Describe the task: each candidate implements it, tests choose the winner..."
-            }
-            Some(SwarmDomain::Collaborative) => {
-                "❯ Describe the project: it is split across database, backend, frontend, security, testing..."
-            }
-            Some(SwarmDomain::RedEclipse) => {
-                "❯ What should the red team attack? (/scope src) Blue team fixes each round..."
+    if app.input.is_empty() {
+        let placeholder = if app.is_busy {
+            "❯ Type a follow-up to queue while agent works (Enter to queue, /queue clear)..."
+        } else {
+            match app.active_swarm_domain() {
+                None => "❯ Ask Ecliven anything...  (/connect codex|agy, /swarm, /help)",
+                Some(SwarmDomain::Code) => {
+                    "❯ Describe the coding task for 3 parallel coders + Chief..."
+                }
+                Some(SwarmDomain::Security(SecuritySubMode::Defense)) => {
+                    "❯ Audit codebase or folder for vulnerabilities (/scope src)..."
+                }
+                Some(SwarmDomain::Security(SecuritySubMode::ThreatModel)) => {
+                    "❯ Run STRIDE threat modeling & hardening review..."
+                }
+                Some(SwarmDomain::Competitive) => {
+                    "❯ Describe the task: each candidate implements it, tests choose the winner..."
+                }
+                Some(SwarmDomain::Collaborative) => {
+                    "❯ Describe the project: it is split across database, backend, frontend, security, testing..."
+                }
+                Some(SwarmDomain::RedEclipse) => {
+                    "❯ What should the red team attack? (/scope src) Blue team fixes each round..."
+                }
             }
         };
         frame.render_widget(
@@ -699,8 +786,8 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
         );
     }
 
-    if !app.is_busy
-        && app.pending_approval.is_none()
+    if app.pending_approval.is_none()
+        && app.pending_question.is_none()
         && app.model_picker.is_none()
         && !app.show_help
         && !app.show_swarm_hub
@@ -719,7 +806,15 @@ fn render_input_box(frame: &mut Frame<'_>, app: &App, area: Rect, is_landing: bo
 
 fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let text = if app.pending_approval.is_some() {
-        " [Y/Enter] Approve  ·  [N/Esc] Deny  ·  [Ctrl+Q] Quit"
+        " [Y/Enter] Approve  ·  [N/Esc] Deny  ·  Click buttons  ·  [Ctrl+Q] Quit"
+    } else if let Some(ref q) = app.pending_question {
+        if q.typing_custom {
+            " Type answer  ·  [Enter] Submit  ·  [Esc/↑] Back to options  ·  Click buttons"
+        } else if q.allow_multiple {
+            " Click or [Space/1-9] Toggle  ·  Type to write custom  ·  [Enter] Submit  ·  [Esc] Cancel"
+        } else {
+            " Click or [1-9/Enter] Choose  ·  Type to write custom  ·  [↑/↓] Move  ·  [Esc] Cancel"
+        }
     } else if app.model_picker.is_some() {
         " Type to filter  ·  [↑/↓] Navigate  ·  [Enter] Select  ·  [Ctrl+R] Refresh  ·  [Esc] Close"
     } else if app.show_swarm_hub {
@@ -734,7 +829,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(footer, area);
 }
 
-fn render_model_picker_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_model_picker_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let Some(ref picker) = app.model_picker else {
         return;
     };
@@ -790,6 +885,7 @@ fn render_model_picker_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let active_model = app.config.active_settings().model.as_str();
     let max_visible = rows[1].height as usize;
 
+    let mut model_hits: Vec<(Rect, ClickTarget)> = Vec::new();
     let mut lines: Vec<Line<'_>> = Vec::new();
     if filtered.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -803,7 +899,13 @@ fn render_model_picker_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
             0
         };
         let end = (start + max_visible.max(1)).min(filtered.len());
-        for (idx, model) in filtered.iter().enumerate().take(end).skip(start) {
+        for (row_offset, (idx, model)) in filtered
+            .iter()
+            .enumerate()
+            .take(end)
+            .skip(start)
+            .enumerate()
+        {
             let is_sel = idx == picker.selected;
             let is_active = model.id == active_model;
             let cursor = if is_sel { "❯ " } else { "  " };
@@ -828,21 +930,31 @@ fn render_model_picker_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 ));
             }
             lines.push(Line::from(spans));
+            let y = rows[1].y.saturating_add(row_offset as u16);
+            if y < rows[1].y.saturating_add(rows[1].height) {
+                model_hits.push((
+                    Rect::new(rows[1].x, y, rows[1].width, 1),
+                    ClickTarget::ModelPickerItem(idx),
+                ));
+            }
         }
     }
 
     frame.render_widget(Paragraph::new(lines), rows[1]);
     frame.render_widget(
         Paragraph::new(Span::styled(
-            "[↑/↓] Move  ·  [Enter] Select  ·  [Ctrl+R] Refresh  ·  [Esc] Close",
+            "Click or [↑/↓] Move  ·  [Enter] Select  ·  [Ctrl+R] Refresh  ·  [Esc] Close",
             Theme::footer_hint(),
         ))
         .alignment(Alignment::Center),
         rows[2],
     );
+    for (r, t) in model_hits {
+        app.hit_map.push(r, t);
+    }
 }
 
-fn render_swarm_hub_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_swarm_hub_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let modal_area = centered_rect(86, 66, area);
     frame.render_widget(Clear, modal_area);
 
@@ -943,20 +1055,51 @@ fn render_swarm_hub_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(sec_card, cards[1]);
 
     let bottom = Paragraph::new(
-        "[1] Code Swarm  ·  [2] Sec: Defensa  ·  [3] Sec: Threat Model  ·  [0] Chat  ·  [Esc] Close",
+        "Click a card or press [1] Code  ·  [2] Defensa  ·  [3] Threat  ·  [0] Chat  ·  [Esc] Close",
     )
     .alignment(Alignment::Center)
     .style(Theme::brand());
     frame.render_widget(bottom, rows[1]);
+
+    app.hit_map.push(cards[0], ClickTarget::SwarmHubCode);
+    let sec_half = cards[1].height / 2;
+    app.hit_map.push(
+        Rect::new(cards[1].x, cards[1].y, cards[1].width, sec_half.max(1)),
+        ClickTarget::SwarmHubDefense,
+    );
+    app.hit_map.push(
+        Rect::new(
+            cards[1].x,
+            cards[1].y.saturating_add(sec_half),
+            cards[1].width,
+            cards[1].height.saturating_sub(sec_half).max(1),
+        ),
+        ClickTarget::SwarmHubThreat,
+    );
+    app.hit_map.push(rows[1], ClickTarget::SwarmHubChat);
 }
 
-fn render_approval_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
+fn render_approval_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let Some(ref pending) = app.pending_approval else {
         return;
     };
 
     let modal_area = centered_rect(80, 70, area);
     frame.render_widget(Clear, modal_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Theme::modal_border())
+        .padding(Padding::horizontal(1))
+        .title(" Tool Approval Required ");
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
 
     let mut lines = vec![
         Line::from(Span::styled(
@@ -980,29 +1123,168 @@ fn render_approval_modal(frame: &mut Frame<'_>, app: &App, area: Rect) {
             };
             lines.push(Line::from(Span::styled(dl.to_string(), style)));
         }
-        lines.push(Line::from(""));
     }
 
-    lines.push(Line::from(Span::styled(
-        "Press [Y] or [Enter] to approve · [N] or [Esc] to deny",
-        Theme::brand(),
-    )));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        rows[0],
+    );
 
-    let block = Block::default()
+    let btns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+    frame.render_widget(
+        Paragraph::new(Span::styled("[ Approve (Y / Enter) ]", Theme::status_done()))
+            .alignment(Alignment::Center),
+        btns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("[ Deny (N / Esc) ]", Theme::error_text()))
+            .alignment(Alignment::Center),
+        btns[1],
+    );
+    app.hit_map.push(btns[0], ClickTarget::ApproveYes);
+    app.hit_map.push(btns[1], ClickTarget::ApproveNo);
+}
+
+fn render_question_modal(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let Some(ref q) = app.pending_question else {
+        return;
+    };
+
+    let modal_area = centered_rect(76, 68, area);
+    frame.render_widget(Clear, modal_area);
+
+    let title = if q.allow_multiple {
+        " ? Question (select one or more, or type) "
+    } else {
+        " ? Question (click, 1-9, or type your answer) "
+    };
+    let outer = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(Theme::modal_border())
+        .padding(Padding::new(1, 1, 0, 0))
+        .title(title);
+    let inner = outer.inner(modal_area);
+    frame.render_widget(outer, modal_area);
+
+    let options_len = q.options.len() as u16;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(options_len.min(9).max(if q.options.is_empty() { 0 } else { 1 })),
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Span::styled(q.question.clone(), Theme::brand()))
+            .wrap(Wrap { trim: false }),
+        rows[0],
+    );
+
+    let mut hits: Vec<(Rect, ClickTarget)> = Vec::new();
+    if !q.options.is_empty() {
+        let mut opt_lines = Vec::new();
+        for (idx, opt) in q.options.iter().enumerate().take(rows[1].height as usize) {
+            let is_sel = !q.typing_custom && q.selected == idx;
+            let cursor = if is_sel { "❯ " } else { "  " };
+            let mark = if q.allow_multiple {
+                if q.checked.get(idx).copied().unwrap_or(false) {
+                    "[x] "
+                } else {
+                    "[ ] "
+                }
+            } else if is_sel {
+                "● "
+            } else {
+                "○ "
+            };
+            let style = if is_sel {
+                Theme::brand()
+            } else {
+                Theme::text_primary()
+            };
+            opt_lines.push(Line::from(vec![
+                Span::styled(cursor, Theme::brand()),
+                Span::styled(mark, style),
+                Span::styled(format!("[{}] {opt}", idx + 1), style),
+            ]));
+            let y = rows[1].y.saturating_add(idx as u16);
+            hits.push((
+                Rect::new(rows[1].x, y, rows[1].width, 1),
+                ClickTarget::QuestionOption(idx),
+            ));
+        }
+        frame.render_widget(Paragraph::new(opt_lines), rows[1]);
+    }
+
+    let custom_focused = q.typing_custom || q.selected == q.custom_row_index();
+    let custom_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(if custom_focused {
+            Theme::border_active()
+        } else {
+            Theme::border_inactive()
+        })
         .padding(Padding::horizontal(1))
-        .title(" Tool Approval Required ");
+        .title(" Custom answer ");
+    let custom_inner = custom_block.inner(rows[3]);
+    let custom_line = if q.custom_input.is_empty() {
+        Line::from(Span::styled(
+            "✎ Click here or start typing your own answer...",
+            Theme::placeholder(),
+        ))
+    } else {
+        Line::from(vec![
+            Span::styled("❯ ", Theme::user_label()),
+            Span::styled(q.custom_input.clone(), Theme::text_primary()),
+        ])
+    };
+    frame.render_widget(Paragraph::new(custom_line).block(custom_block), rows[3]);
+    hits.push((rows[3], ClickTarget::QuestionCustom));
 
-    let paragraph = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false });
+    if q.typing_custom && custom_inner.width > 2 {
+        let col = (2 + q.custom_input.chars().count()) as u16;
+        let cx = (custom_inner.x + col).min(custom_inner.x + custom_inner.width - 1);
+        frame.set_cursor_position((cx, custom_inner.y));
+    }
 
-    frame.render_widget(paragraph, modal_area);
+    let btns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[5]);
+    frame.render_widget(
+        Paragraph::new(Span::styled("[ Submit (Enter) ]", Theme::status_done()))
+            .alignment(Alignment::Center),
+        btns[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Span::styled("[ Cancel (Esc) ]", Theme::error_text()))
+            .alignment(Alignment::Center),
+        btns[1],
+    );
+    hits.push((btns[0], ClickTarget::QuestionSubmit));
+    hits.push((btns[1], ClickTarget::QuestionCancel));
+
+    for (r, t) in hits {
+        app.hit_map.push(r, t);
+    }
 }
 
-fn render_onboarding_wizard(frame: &mut Frame<'_>, ob: &OnboardingState, area: Rect) {
+fn render_onboarding_wizard(
+    frame: &mut Frame<'_>,
+    ob: &OnboardingState,
+    hits: &mut HitMap,
+    area: Rect,
+) {
     let modal_area = centered_rect(82, 76, area);
     frame.render_widget(Clear, modal_area);
 
@@ -1109,14 +1391,22 @@ fn render_onboarding_wizard(frame: &mut Frame<'_>, ob: &OnboardingState, area: R
                 )),
             ];
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[1]);
+            let btns = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(rows[2]);
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "[Enter / A] Aceptar y continuar   ·   [Esc / Ctrl+Q] Rechazar y salir",
-                    Theme::brand(),
-                ))
-                .alignment(Alignment::Center),
-                rows[2],
+                Paragraph::new(Span::styled("[Enter / A] Aceptar y continuar", Theme::brand()))
+                    .alignment(Alignment::Center),
+                btns[0],
             );
+            frame.render_widget(
+                Paragraph::new(Span::styled("[Esc / Ctrl+Q] Rechazar y salir", Theme::error_text()))
+                    .alignment(Alignment::Center),
+                btns[1],
+            );
+            hits.push(btns[0], ClickTarget::OnboardingConfirm);
+            hits.push(btns[1], ClickTarget::OnboardingCancel);
         }
         OnboardingStep::Telemetry => {
             let (on_dot, on_style, off_dot, off_style) = if ob.telemetry_choice {
@@ -1169,14 +1459,23 @@ fn render_onboarding_wizard(frame: &mut Frame<'_>, ob: &OnboardingState, area: R
                 )),
             ];
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), rows[1]);
+            hits.push(
+                Rect::new(rows[1].x, rows[1].y.saturating_add(5), rows[1].width, 2),
+                ClickTarget::OnboardingTelemetry(true),
+            );
+            hits.push(
+                Rect::new(rows[1].x, rows[1].y.saturating_add(8), rows[1].width, 2),
+                ClickTarget::OnboardingTelemetry(false),
+            );
             frame.render_widget(
                 Paragraph::new(Span::styled(
-                    "[↑/↓ / Space / 1 / 2] Elegir   ·   [Enter] Continuar",
+                    "Click o [↑/↓ / Space / 1 / 2] Elegir   ·   [Enter] Continuar",
                     Theme::brand(),
                 ))
                 .alignment(Alignment::Center),
                 rows[2],
             );
+            hits.push(rows[2], ClickTarget::OnboardingConfirm);
         }
         OnboardingStep::Workspace => {
             let mut lines = vec![
@@ -1212,7 +1511,7 @@ fn render_onboarding_wizard(frame: &mut Frame<'_>, ob: &OnboardingState, area: R
                 };
                 let end = (start + max_visible.max(1)).min(total);
 
-                for idx in start..end {
+                for (row_offset, idx) in (start..end).enumerate() {
                     let selected = idx == ob.selected_index;
                     let prefix = if selected { "❯ " } else { "  " };
                     let style = if selected {
@@ -1236,6 +1535,13 @@ fn render_onboarding_wizard(frame: &mut Frame<'_>, ob: &OnboardingState, area: R
                     };
 
                     lines.push(Line::from(Span::styled(format!("{prefix}{label}"), style)));
+                    let y = rows[1].y.saturating_add(3 + row_offset as u16);
+                    if y < rows[1].y.saturating_add(rows[1].height) {
+                        hits.push(
+                            Rect::new(rows[1].x, y, rows[1].width, 1),
+                            ClickTarget::OnboardingFolder(idx),
+                        );
+                    }
                 }
             }
 
