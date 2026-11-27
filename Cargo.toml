@@ -1,6 +1,6 @@
 [package]
 name = "ecliven-code"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 description = "Terminal-first AI coding agent built in Rust"
 authors = ["Ecliven Code Contributors"]
